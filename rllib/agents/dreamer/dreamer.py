@@ -32,6 +32,8 @@ DEFAULT_CONFIG = with_common_config({
     "discount": 0.99,
     # Lambda
     "lambda": 0.95,
+    # Clipping is done inherently via policy tanh.
+    "clip_actions": False,
     # Training iterations per data collection from real env
     "dreamer_train_iters": 100,
     # Horizon for Enviornment (1000 for Mujoco/DMC)
@@ -46,6 +48,10 @@ DEFAULT_CONFIG = with_common_config({
     "free_nats": 3.0,
     # KL Coeff for the Model Loss
     "kl_coeff": 1.0,
+    # Reinforce Coeff for the Model Loss
+    "rei_coeff": 1.0,
+    # Entropy Coeff for the Model Loss
+    "ent_coeff": 1.0,
     # Distributed Dreamer not implemented yet
     "num_workers": 0,
     # Prefill Timesteps
@@ -60,14 +66,18 @@ DEFAULT_CONFIG = with_common_config({
     "dreamer_model": {
         "custom_model": DreamerModel,
         # RSSM/PlaNET parameters
-        "deter_size": 200,
-        "stoch_size": 30,
+        "deter_size": 100,
+        "stoch_size": 50,
         # CNN Decoder Encoder
         "depth_size": 32,
         # General Network Parameters
-        "hidden_size": 400,
+        "hidden_size": 150,  # orig was 400 but not effective
         # Action STD
         "action_init_std": 5.0,
+        "hyper_size": 12,
+        "n_z": 9,
+        "decay": 0.9,
+        "simple_rnn": False
     },
 
     "env_config": {
@@ -199,7 +209,7 @@ class DreamerIteration:
         metrics = _get_shared_metrics()
         metrics.info[LEARNER_INFO] = fetches
         metrics.counters[STEPS_SAMPLED_COUNTER] = self.episode_buffer.timesteps
-        metrics.counter[STEPS_SAMPLED_COUNTER] *= self.repeat
+        metrics.counters[STEPS_SAMPLED_COUNTER] *= self.repeat
         res = collect_metrics(local_worker=self.worker)
         res["info"] = metrics.info
         res["info"].update(metrics.counters)

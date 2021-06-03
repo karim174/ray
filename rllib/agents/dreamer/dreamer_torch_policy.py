@@ -23,10 +23,11 @@ def compute_dreamer_loss(obs,
                          discount=0.99,
                          lambda_=0.95,
                          kl_coeff=1.0,
+                         ent_coeff=1.0,
+                         rei_coeff=1.0,
                          free_nats=3.0,
                          log=False):
     """Constructs loss for the Dreamer objective
-
         Args:
             obs (TensorType): Observations (o_t)
             action (TensorType): Actions (a_(t-1))
@@ -52,25 +53,37 @@ def compute_dreamer_loss(obs,
 
     # PlaNET Model Loss
     latent = model.encoder(obs)
-    post, prior = model.dynamics.observe(latent, action)
+    post, prior, hyper_state, mask = model.dynamics.observe(latent, action)
     features = model.dynamics.get_feature(post)
     image_pred = model.decoder(features)
     reward_pred = model.reward(features)
-    image_loss = -torch.mean(image_pred.log_prob(obs))
-    reward_loss = -torch.mean(reward_pred.log_prob(reward))
+    image_loss = -image_pred.log_prob(obs)
+    reward_loss = -reward_pred.log_prob(reward)
     prior_dist = model.dynamics.get_dist(prior[0], prior[1])
     post_dist = model.dynamics.get_dist(post[0], post[1])
     div = torch.mean(
         torch.distributions.kl_divergence(post_dist, prior_dist).sum(dim=2))
     div = torch.clamp(div, min=free_nats)
-    model_loss = kl_coeff * div + reward_loss + image_loss
-
-    # Actor Loss
+    mask_logp_x, mask_entropy_x, mask_logp_h, mask_entropy_h = mask
+    mask_logp_x, mask_entropy_x, mask_logp_h, mask_entropy_h = mask
+    with torch.no_grad():
+        # reinf_reward = (image_pred.log_prob(obs)) + \
+        #                    reward_pred.log_prob(reward) # shape should be (batch, time)
+        reinf_reward = -(image_loss + reward_loss)  # weighted by the likelihood
+        reinforce_reward = reinf_reward.detach().clone()  # remove the rewards from the graph and clone them
+    reinforce_reward_ema = model.ema.update(reinforce_reward)
+    mask_logp = mask_logp_x + mask_logp_h
+    mask_reinforce_loss = -torch.mean((reinforce_reward - reinforce_reward_ema) * mask_logp)
+    mask_entropy_loss = -(torch.mean(mask_entropy_x) + torch.mean(mask_entropy_x))
+    image_loss = torch.mean(image_loss)
+    reward_loss = torch.mean(reward_loss)
+    model_loss = kl_coeff * div + reward_loss + image_loss + rei_coeff*mask_entropy_loss + ent_coeff * mask_reinforce_loss# Actor Loss
     # [imagine_horizon, batch_length*batch_size, feature_size]
     with torch.no_grad():
         actor_states = [v.detach() for v in post]
+        actor_hyper_states = [v.detach() for v in hyper_state]
     with FreezeParameters(model_weights):
-        imag_feat = model.imagine_ahead(actor_states, imagine_horizon)
+        imag_feat = model.imagine_ahead(actor_states, actor_hyper_states, imagine_horizon)
     with FreezeParameters(model_weights + critic_weights):
         reward = model.reward(imag_feat).mean
         value = model.value(imag_feat).mean
@@ -138,9 +151,9 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_):
 def log_summary(obs, action, embed, image_pred, model):
     truth = obs[:6] + 0.5
     recon = image_pred.mean[:6]
-    init, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5])
+    init, _, _, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5])
     init = [itm[:, -1] for itm in init]
-    prior = model.dynamics.imagine(action[:6, 5:], init)
+    prior, _, _ = model.dynamics.imagine(action[:6, 5:], init)
     openl = model.decoder(model.dynamics.get_feature(prior)).mean
 
     mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
@@ -162,6 +175,8 @@ def dreamer_loss(policy, model, dist_class, train_batch):
         policy.config["discount"],
         policy.config["lambda"],
         policy.config["kl_coeff"],
+        policy.config["ent_coeff"],
+        policy.config["rei_coeff"],
         policy.config["free_nats"],
         log_gif,
     )
@@ -183,6 +198,7 @@ def build_dreamer_model(policy, obs_space, action_space, config):
         framework="torch")
 
     policy.model_variables = policy.model.variables()
+    policy.model_loss_baseline = 0
 
     return policy.model
 
