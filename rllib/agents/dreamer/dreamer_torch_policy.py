@@ -158,7 +158,7 @@ def log_summary(obs, action, embed, image_pred, model):
     recon = image_pred.mean[:6]
     init, _, _, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5])
     init = [itm[:, -1] for itm in init]
-    prior, _, _ = model.dynamics.imagine(action[:6, 5:], init)
+    prior = model.dynamics.imagine(action[:6, 5:], init)
     openl = model.decoder(model.dynamics.get_feature(prior)).mean
 
     mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
