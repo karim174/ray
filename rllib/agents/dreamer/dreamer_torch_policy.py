@@ -23,7 +23,7 @@ def compute_dreamer_loss(obs,
                          discount=0.99,
                          lambda_=0.95,
                          kl_coeff=1.0,
-                         ent_coeff=1.0,
+                         ent_coeff=0.1,
                          rei_coeff=1.0,
                          free_nats=3.0,
                          log=False):
@@ -37,6 +37,8 @@ def compute_dreamer_loss(obs,
             discount (float): Discount
             lambda_ (float): Lambda, like in GAE
             kl_coeff (float): KL Coefficient for Divergence loss in model loss
+            ent_coeff(float): Mask Entropy Coefficient for Mask Entropy loss in model loss
+            rei_coeff(float): Reinforce Coefficient for Reinforce loss in model loss
             free_nats (float): Threshold for minimum divergence in model loss
             log (bool): If log, generate gifs
         """
@@ -74,10 +76,11 @@ def compute_dreamer_loss(obs,
     reinforce_reward_ema = model.ema.update(reinforce_reward)
     mask_logp = mask_logp_x + mask_logp_h
     mask_reinforce_loss = -torch.mean((reinforce_reward - reinforce_reward_ema) * mask_logp)
-    mask_entropy_loss = -(torch.mean(mask_entropy_x) + torch.mean(mask_entropy_x))
+    mask_entropy_loss = -(torch.mean(mask_entropy_x) + torch.mean(mask_entropy_h))
     image_loss = torch.mean(image_loss)
     reward_loss = torch.mean(reward_loss)
-    model_loss = kl_coeff * div + reward_loss + image_loss + rei_coeff*mask_entropy_loss + ent_coeff * mask_reinforce_loss# Actor Loss
+    model_loss = kl_coeff * div + reward_loss + image_loss +\
+                 ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss
     # [imagine_horizon, batch_length*batch_size, feature_size]
     with torch.no_grad():
         actor_states = [v.detach() for v in post]
@@ -121,6 +124,8 @@ def compute_dreamer_loss(obs,
         "critic_loss": critic_loss,
         "prior_ent": prior_ent,
         "post_ent": post_ent,
+        "mask_ent_loss": mask_entropy_loss,
+        "mask_reinforce_loss": mask_reinforce_loss
     }
 
     if log_gif is not None:

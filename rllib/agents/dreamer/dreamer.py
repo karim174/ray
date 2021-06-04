@@ -51,7 +51,7 @@ DEFAULT_CONFIG = with_common_config({
     # Reinforce Coeff for the Model Loss
     "rei_coeff": 1.0,
     # Entropy Coeff for the Model Loss
-    "ent_coeff": 1.0,
+    "ent_coeff": 0.1,
     # Distributed Dreamer not implemented yet
     "num_workers": 0,
     # Prefill Timesteps

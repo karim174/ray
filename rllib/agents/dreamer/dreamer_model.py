@@ -25,14 +25,14 @@ class Reshape(nn.Module):
         return x.view(*self.shape)
 
 
-class EMABatchTime:
+class EMA: #BatchTime:
     '''
     This class is mainly targeting EMA of losses in batched temporal data
     '''
     def __init__(self, decay: float = 0.9):
 
         self.decay = decay
-        self.b_k = torch.Tensor([0.])
+        self.b_k = torch.Tensor([float('nan')])
 
     def update(self, new_value):
         """
@@ -42,9 +42,13 @@ class EMABatchTime:
         new_value_c = new_value.detach().clone()
 
         with torch.no_grad():
-            if len(new_value.size()) > 1:
-                new_value_c=new_value_c.mean(tuple(range(2, len(new_value.size()))))
+            #if len(new_value.size()) > 1:
+            #    new_value_c=new_value_c.mean(tuple(range(2, len(new_value.size()))))
                 #print(new_value_c)
+            new_value_c=new_value_c.mean()
+            if torch.isnan(self.b_k):
+              self.b_k = new_value_c
+              return self.b_k
             self.b_k = self.decay*self.b_k + (1-self.decay)*new_value_c
 
         return self.b_k
@@ -700,7 +704,7 @@ class DreamerModel(TorchModelV2, nn.Module):
                                   self.hidden_size)
         self.state = None
 
-        self.ema = EMABatchTime(self.decay)
+        self.ema = EMA(self.decay)#EMABatchTime(self.decay)
         self.device = (torch.device("cuda")
                        if torch.cuda.is_available() else torch.device("cpu"))
 
