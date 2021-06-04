@@ -124,8 +124,8 @@ def compute_dreamer_loss(obs,
         "critic_loss": critic_loss,
         "prior_ent": prior_ent,
         "post_ent": post_ent,
-        "mask_ent_loss": mask_entropy_loss,
-        "mask_reinforce_loss": mask_reinforce_loss
+        #"mask_ent_loss": mask_entropy_loss,
+        #"mask_reinforce_loss": mask_reinforce_loss
     }
 
     if log_gif is not None:
