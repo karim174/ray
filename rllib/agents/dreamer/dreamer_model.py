@@ -343,6 +343,7 @@ class HyperGRUCell(nn.Module):
             self.w_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z)) for _ in range(3)])
             self.w_m_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
 
+
         for param in self.w_h:
             nn.init.orthogonal_(param)
         for param in self.w_m_h:
@@ -373,15 +374,18 @@ class HyperGRUCell(nn.Module):
             z_b = self.z_b(h_hat)
             m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
             m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
-            m_h_dist = td.Bernoulli(logits=m_h)
+            m_h = torch.sigmoid(m_h)
+            m_x = torch.sigmoid(m_x)
+            m_h_dist = td.Bernoulli(m_h)
             m_h_dist = td.Independent(m_h_dist, 2)
-            m_x_dist = td.Bernoulli(logits=m_x)
+            m_x_dist = td.Bernoulli(m_x)
             m_x_dist = td.Independent(m_x_dist, 2)
             m_h_sample = m_h_dist.sample()
             m_x_sample = m_x_dist.sample()
             h_next = torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
-                torch.einsum('bij,bj->bi',  m_x_sample * torch.einsum('ijk,bk->bij',self.w_x[0], z_x), x) + \
+                torch.einsum('bij,bj->bi',  m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
                 self.d_b(z_b)
+
             return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
 
         z_h = self.z_h(h_hat).chunk(3, dim=-1)
@@ -404,14 +408,16 @@ class HyperGRUCell(nn.Module):
 
                 m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
                 m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
-                m_h_dist = td.Bernoulli(logits=m_h)
+                m_h = torch.sigmoid(m_h)
+                m_x = torch.sigmoid(m_x)
+                m_h_dist = td.Bernoulli(m_h)
                 m_h_dist = td.Independent(m_h_dist, 2)
-                m_x_dist = td.Bernoulli(logits=m_x)
+                m_x_dist = td.Bernoulli(m_x)
                 m_x_dist = td.Independent(m_x_dist, 2)
                 m_h_sample = m_h_dist.sample()
                 m_x_sample = m_x_dist.sample()
                 #print(m_h_sample.size(), self.w_h[i].size(), z_h[i].size(), h.size(), ruo[0].size())
-                y = torch.tanh(torch.einsum('bij,bj->bi',  m_h_sample*torch.einsum('ijk,bk->bij',self.w_h[i], z_h[i]), ruo[0] * h) + \
+                y = torch.tanh(torch.einsum('bij,bj->bi',  m_h_sample*torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), ruo[0] * h) + \
                                torch.einsum('bij,bj->bi', m_x_sample*torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
                                self.d_b[i](z_b[i]))
 
