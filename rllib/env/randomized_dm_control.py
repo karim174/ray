@@ -26,8 +26,7 @@ class RDMCEnv(DMCEnv):
         self.bodies = self._env.physics.named.model.body_mass._axes[0]._names[1:]
         self.orig_body_mass = self._env.physics.named.model.body_mass[self.bodies]
         self.orig_geom_size = self._env.physics.named.model.geom_size[self.bodies]
-        print('init orig_body_mass:', self.orig_body_mass)
-        print('init orig_geom_size:', self.orig_geom_size)
+
         if self.rng.random() < 0.5:
 
             density = 1
@@ -54,19 +53,12 @@ class RDMCEnv(DMCEnv):
                 self._env.physics.named.model.body_mass[self.bodies] = bodies_mass
                 self._env.physics.named.model.geom_size[self.bodies] = bodies_sizes
 
-            print('changed body_mass:', self._env.physics.named.model.body_mass[self.bodies])
-            print('changed geom_size:', self._env.physics.named.model.geom_size[self.bodies])
 
     def reset(self):
-        print('start reset body_mass:', self._env.physics.named.model.body_mass[self.bodies])
-        print('start reset geom_size:', self._env.physics.named.model.geom_size[self.bodies])
-        #return everything to normal parameters
+        # return everything to normal parameters
         with self._env.physics.reset_context():
             self._env.physics.named.model.body_mass[self.bodies] = self.orig_body_mass
             self._env.physics.named.model.geom_size[self.bodies] = self.orig_geom_size
-
-        print('back reset body_mass:', self._env.physics.named.model.body_mass[self.bodies])
-        print('back reset geom_size:', self._env.physics.named.model.geom_size[self.bodies])
 
         time_step = self._env.reset()
 
@@ -95,9 +87,6 @@ class RDMCEnv(DMCEnv):
             with self._env.physics.reset_context():
                 self._env.physics.named.model.body_mass[self.bodies] = bodies_mass
                 self._env.physics.named.model.geom_size[self.bodies] = bodies_sizes
-
-            print('change body_mass:', self._env.physics.named.model.body_mass[self.bodies])
-            print('change geom_size:', self._env.physics.named.model.geom_size[self.bodies])
 
         self.current_state = _flatten_obs(time_step.observation)
         obs = self._get_obs(time_step)
