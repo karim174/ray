@@ -1,4 +1,5 @@
 from ray.rllib.env.dm_control_wrapper import DMCEnv
+from ray.rllib.env.randomized_dm_control import RDMCEnv
 """
 8 Environments from Deepmind Control Suite
 """
@@ -132,6 +133,21 @@ def humanoid_walk(from_pixels=True,
     return DMCEnv(
         "humanoid",
         "walk",
+        from_pixels=from_pixels,
+        height=height,
+        width=width,
+        frame_skip=frame_skip,
+        channels_first=channels_first)
+
+
+def random_cheetah_run(from_pixels=True,
+                height=64,
+                width=64,
+                frame_skip=2,
+                channels_first=True):
+    return RDMCEnv(
+        "cheetah",
+        "run",
         from_pixels=from_pixels,
         height=height,
         width=width,
