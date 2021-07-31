@@ -596,11 +596,14 @@ class RSSM(nn.Module):
         for index in indices:
             last_prior, last_hyper, mask = self.img_step(last_prior, action[index], last_hyper)
             [o.append(s) for s, o in zip(last_prior, priors)]
-
+            [o.append(s) for s, o in zip(last_hyper, hyper_states)]
 
         prior = [torch.stack(x, dim=0) for x in priors]
+        hyper_state = [torch.stack(x, dim=0) for x in hyper_states]
         prior = [e.permute(1, 0, 2) for e in prior]
-        return prior
+        hyper_state = [e.permute(1, 0, 2) for e in hyper_state]
+
+        return prior, hyper_state
 
     def obs_step(
             self, prev_state: TensorType,
@@ -660,10 +663,12 @@ class RSSM(nn.Module):
                [m_x_logp, m_x_entropy, m_h_logp, m_h_entropy]
         # [m_x_logp, m_x_entropy, m_x_sample, m_h_logp, m_h_entropy, m_h_sample]
 
-
-    def get_feature(self, state: List[TensorType]) -> TensorType:
+    def get_feature(self, state: List[TensorType], hyper_state: List[TensorType] = None) -> TensorType:
         # Constructs feature for input to reward, decoder, actor, critic
-        return torch.cat([state[2], state[3]], dim=-1)
+        if hyper_state is not None:
+            return torch.cat([state[2], state[3], hyper_state[0]], dim=-1)
+        else:
+            return torch.cat([state[2], state[3]], dim=-1)
 
     def get_dist(self, mean: TensorType, std: TensorType) -> TensorType:
         return td.Normal(mean, std)
@@ -685,15 +690,19 @@ class DreamerModel(TorchModelV2, nn.Module):
         self.n_z = model_config['n_z']
         self.decay = model_config['decay']
         self.simple_rnn = model_config['simple_rnn']
+        self.hyper_in_state = model_config['hyper_in_state']
 
 
         self.action_size = action_space.shape[0]
 
         self.encoder = ConvEncoder(self.depth)
         self.decoder = ConvDecoder(
-            self.stoch_size + self.deter_size, depth=self.depth)
-        self.reward = DenseDecoder(self.stoch_size + self.deter_size, 1, 2,
-                                   self.hidden_size)
+            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
+            depth=self.depth)
+        self.reward = DenseDecoder(
+            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
+            1, 2,
+            self.hidden_size)
         self.dynamics = RSSM(
             self.action_size,
             32 * self.depth,
@@ -704,9 +713,9 @@ class DreamerModel(TorchModelV2, nn.Module):
             n_z=self.n_z,
             simple_rnn=self.simple_rnn
             )
-        self.actor = ActionDecoder(self.stoch_size + self.deter_size,
+        self.actor = ActionDecoder(self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
                                    self.action_size, 4, self.hidden_size)
-        self.value = DenseDecoder(self.stoch_size + self.deter_size, 1, 3,
+        self.value = DenseDecoder(self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size, 1, 3,
                                   self.hidden_size)
         self.state = None
 
@@ -731,7 +740,7 @@ class DreamerModel(TorchModelV2, nn.Module):
 
         embed = self.encoder(obs)
         post, _, hyper_state, _ = self.dynamics.obs_step(post, action, embed, hyper_state)
-        feat = self.dynamics.get_feature(post)
+        feat = self.dynamics.get_feature(post, hyper_state if self.hyper_in_state else None)
 
         action_dist = self.actor(feat)
         if explore:
@@ -761,7 +770,7 @@ class DreamerModel(TorchModelV2, nn.Module):
 
 
         def next_state(state, hyper_state):
-            feature = self.dynamics.get_feature(state).detach()
+            feature = self.dynamics.get_feature(state, hyper_state if self.hyper_in_state else None).detach()
             action = self.actor(feature).rsample()
             next_state, hyper_state, _ = self.dynamics.img_step(state, action, hyper_state)
             return next_state, hyper_state, _
@@ -769,12 +778,15 @@ class DreamerModel(TorchModelV2, nn.Module):
         last = start_prior
         last_hyper = start_hyper
         outputs = [[] for _ in range(len(start_prior))]
+        hyper_outputs = [[] for _ in range(len(start_hyper))]
         for _ in range(horizon):
             last, last_hyper, _ = next_state(last, last_hyper)
             [o.append(s) for s, o in zip(last, outputs)]
+            [o.append(s) for s, o in zip(last_hyper, hyper_outputs)]
         outputs = [torch.stack(x, dim=0) for x in outputs]
+        hyper_outputs = [torch.stack(x, dim=0) for x in hyper_outputs]
 
-        imag_feat = self.dynamics.get_feature(outputs)
+        imag_feat = self.dynamics.get_feature(outputs, hyper_outputs if self.hyper_in_state else None)
         return imag_feat
 
     def get_initial_state(self) -> List[TensorType]:

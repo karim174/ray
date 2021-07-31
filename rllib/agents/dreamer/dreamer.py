@@ -77,7 +77,8 @@ DEFAULT_CONFIG = with_common_config({
         "hyper_size": 12,
         "n_z": 9,
         "decay": 0.9,
-        "simple_rnn": False
+        "simple_rnn": False,
+        "hyper_in_state": True
     },
 
     "env_config": {

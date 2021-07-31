@@ -56,7 +56,7 @@ def compute_dreamer_loss(obs,
     # PlaNET Model Loss
     latent = model.encoder(obs)
     post, prior, hyper_state, mask = model.dynamics.observe(latent, action)
-    features = model.dynamics.get_feature(post)
+    features = model.dynamics.get_feature(post, hyper_state if model.hyper_in_state else None)
     image_pred = model.decoder(features)
     reward_pred = model.reward(features)
     image_loss = -image_pred.log_prob(obs)
@@ -156,10 +156,11 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_):
 def log_summary(obs, action, embed, image_pred, model):
     truth = obs[:6] + 0.5
     recon = image_pred.mean[:6]
-    init, _, _, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5])
+    init, _, hyper_init, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5]) #fix
     init = [itm[:, -1] for itm in init]
-    prior = model.dynamics.imagine(action[:6, 5:], init)
-    openl = model.decoder(model.dynamics.get_feature(prior)).mean
+    hyper_init = [itm[:, -1] for itm in hyper_init]
+    prior, hyper = model.dynamics.imagine(action[:6, 5:], init, hyper_state=hyper_init)
+    openl = model.decoder(model.dynamics.get_feature(prior, hyper)).mean
 
     mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
     error = (mod - truth + 1.0) / 2.0
