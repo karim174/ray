@@ -32,11 +32,11 @@ class RDMCEnv(DMCEnv):
             density = 1
             # sample density
             if self.rng.random() < 0.5:
-                density = self.rng.uniform(0.5, 3)
+                density = self.rng.uniform(0.1, 1)
             sym_bodies = set(
                 body.split('_', 1)[1] if body.find("_") != -1 else body for body in self.bodies)  # or seen_add(body))
             change_mask = self.rng.binomial(1, p=0.5, size=len(sym_bodies))
-            steps = np.arange(-0.5, 0.75, 0.25)
+            steps = np.arange(-5, 5.25, 0.25)
             steps = np.concatenate([steps[:steps.shape[0] // 2], steps[steps.shape[0] // 2 + 1:]])
             change_values = self.rng.choice(steps, len(sym_bodies))
             change_factor = 1 + change_values * change_mask
