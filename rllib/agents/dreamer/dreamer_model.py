@@ -25,12 +25,12 @@ class Reshape(nn.Module):
         return x.view(*self.shape)
 
 
-class EMA: #BatchTime:
+class EMA:  # BatchTime:
     '''
     This class is mainly targeting EMA of losses in batched temporal data
     '''
-    def __init__(self, decay: float = 0.9):
 
+    def __init__(self, decay: float = 0.9):
         self.decay = decay
         self.b_k = torch.Tensor([float('nan')])
 
@@ -42,14 +42,14 @@ class EMA: #BatchTime:
         new_value_c = new_value.detach().clone()
 
         with torch.no_grad():
-            #if len(new_value.size()) > 1:
+            # if len(new_value.size()) > 1:
             #    new_value_c=new_value_c.mean(tuple(range(2, len(new_value.size()))))
-                #print(new_value_c)
-            new_value_c=new_value_c.mean()
+            # print(new_value_c)
+            new_value_c = new_value_c.mean()
             if torch.isnan(self.b_k):
-              self.b_k = new_value_c
-              return self.b_k
-            self.b_k = self.decay*self.b_k + (1-self.decay)*new_value_c
+                self.b_k = new_value_c
+                return self.b_k
+            self.b_k = self.decay * self.b_k + (1 - self.decay) * new_value_c
 
         return self.b_k
 
@@ -296,7 +296,8 @@ class HyperGRUCell(nn.Module):
                  hidden_size: int = 75,
                  hyper_size: int = 15,
                  n_z: int = 12,
-                 simple_rnn: bool = False):
+                 simple_rnn: bool = False,
+                 add_mask: bool = False):
         """
         Args:
         input_size (int): Hidden size or $f_theta(s_{t-1}, a_{t-a})$
@@ -309,103 +310,77 @@ class HyperGRUCell(nn.Module):
 
         self.hyper = LSTMCell(hidden_size + input_size, hyper_size)
         self.simple_rnn = simple_rnn
+        self.add_mask = add_mask
 
         if simple_rnn:
             # I feel that it's a typo.
             self.z_h = nn.Linear(hyper_size, n_z)
-            self.m_h = nn.Linear(hyper_size, n_z)
-
             self.z_x = nn.Linear(hyper_size, n_z)
-            self.m_x = nn.Linear(hyper_size, n_z)
+
+            if self.add_mask:
+                self.m_h = nn.Linear(hyper_size, n_z)
+                self.m_x = nn.Linear(hyper_size, n_z)
 
             self.z_b = nn.Linear(hyper_size, n_z, bias=False)
             self.d_b = nn.Linear(n_z, hidden_size)
 
-            #Single parameters are listed (in a ParameterList) to be registered in the model parameters
+            # Single parameters are listed (in a ParameterList) to be registered in the model parameters
             self.w_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
-            self.w_m_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
             self.w_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
-            self.w_m_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
+
+            if self.add_mask:
+                self.w_m_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
+                self.w_m_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
 
         else:
             self.z_h = nn.Linear(hyper_size, 3 * n_z)
-            self.m_h = nn.Linear(hyper_size, n_z)
-
             self.z_x = nn.Linear(hyper_size, 3 * n_z)
-            self.m_x = nn.Linear(hyper_size, n_z)
 
             self.z_b = nn.Linear(hyper_size, 3 * n_z, bias=False)
             d_b = [nn.Linear(n_z, hidden_size) for _ in range(3)]
             self.d_b = nn.ModuleList(d_b)
 
             self.w_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z)) for _ in range(3)])
-            self.w_m_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
             self.w_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z)) for _ in range(3)])
-            self.w_m_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
 
+            self.m_h = nn.Linear(hyper_size, n_z) if self.add_mask else None
+            self.m_x = nn.Linear(hyper_size, n_z) if self.add_mask else None
+            self.w_m_h = nn.ParameterList(
+                [nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))]) if self.add_mask else None
+            self.w_m_x = nn.ParameterList(
+                [nn.Parameter(torch.zeros(hidden_size, input_size, n_z))]) if self.add_mask else None
 
         for param in self.w_h:
             nn.init.orthogonal_(param)
-        for param in self.w_m_h:
-            nn.init.orthogonal_(param)
         for param in self.w_x:
             nn.init.orthogonal_(param)
-        for param in self.w_m_x:
-            nn.init.orthogonal_(param)
+
+        if add_mask:
+            for param in self.w_m_h:
+                nn.init.orthogonal(param)
+            for param in self.w_m_x:
+                nn.init.orthogonal(param)
         # Layer normalization
-        #self.layer_norm = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(3)])
-        #self.layer_norm_c = nn.LayerNorm(hidden_size)
+        # self.layer_norm = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(3)])
+        # self.layer_norm_c = nn.LayerNorm(hidden_size)
 
     def forward(self,
-                 x: torch.Tensor,
-                 h: torch.Tensor,
-                 h_hat: torch.Tensor,
-                 c_hat: torch.Tensor):
-        #print('debugging in hypercell x and h shapes are ', x.shape, h.shape)
+                x: torch.Tensor,
+                h: torch.Tensor,
+                h_hat: torch.Tensor,
+                c_hat: torch.Tensor):
+        # print('debugging in hypercell x and h shapes are ', x.shape, h.shape)
         x_hat = torch.cat((h, x), dim=-1)
         h_hat, c_hat = self.hyper(x_hat, [h_hat, c_hat])
 
         if self.simple_rnn:
 
             z_h = self.z_h(h_hat)
-            m_h = self.m_h(h_hat)
             z_x = self.z_x(h_hat)
-            m_x = self.m_x(h_hat)
             z_b = self.z_b(h_hat)
-            m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
-            m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
-            m_h = torch.sigmoid(m_h)
-            m_x = torch.sigmoid(m_x)
-            m_h_dist = td.Bernoulli(m_h)
-            m_h_dist = td.Independent(m_h_dist, 2)
-            m_x_dist = td.Bernoulli(m_x)
-            m_x_dist = td.Independent(m_x_dist, 2)
-            m_h_sample = m_h_dist.sample()
-            m_x_sample = m_x_dist.sample()
-            h_next = torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
-                torch.einsum('bij,bj->bi',  m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
-                self.d_b(z_b)
-
-            return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
-
-        z_h = self.z_h(h_hat).chunk(3, dim=-1)
-        m_h = self.m_h(h_hat)
-        z_x = self.z_x(h_hat).chunk(3, dim=-1)
-        m_x = self.m_x(h_hat)
-        z_b = self.z_b(h_hat).chunk(3, dim=-1)
-
-        # We calculate $r$, $u$, and $o$ in a loop
-        ruo = []
-        for i in range(3):
-
-            if i != 2:
-                y = torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), h) + \
-                    torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                    self.d_b[i](z_b[i])
-                #ruo.append(torch.sigmoid(self.layer_norm[i](y)))
-                ruo.append(torch.sigmoid(y))
-            else:
-
+            if self.add_mask:
+                m_h = self.m_h(h_hat)
+                m_x = self.m_x(h_hat)
                 m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
                 m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
                 m_h = torch.sigmoid(m_h)
@@ -416,18 +391,73 @@ class HyperGRUCell(nn.Module):
                 m_x_dist = td.Independent(m_x_dist, 2)
                 m_h_sample = m_h_dist.sample()
                 m_x_sample = m_x_dist.sample()
-                #print(m_h_sample.size(), self.w_h[i].size(), z_h[i].size(), h.size(), ruo[0].size())
-                y = torch.tanh(torch.einsum('bij,bj->bi',  m_h_sample*torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), ruo[0] * h) + \
-                               torch.einsum('bij,bj->bi', m_x_sample*torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                               self.d_b[i](z_b[i]))
+                h_next = torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
+                         torch.einsum('bij,bj->bi', m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
+                         self.d_b(z_b)
+            else:
+                m_h_dist = None
+                m_x_dist = None
+                m_h_sample = None
+                m_x_sample = None
+                h_next = torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
+                         torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
+                         self.d_b(z_b)
 
-                #ruo.append(torch.tanh(self.layer_norm[i](y)))
+            return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
+
+        z_h = self.z_h(h_hat).chunk(3, dim=-1)
+        z_x = self.z_x(h_hat).chunk(3, dim=-1)
+        z_b = self.z_b(h_hat).chunk(3, dim=-1)
+
+        if self.add_mask:
+            m_h = self.m_h(h_hat)
+            m_x = self.m_x(h_hat)
+
+        # We calculate $r$, $u$, and $o$ in a loop
+        ruo = []
+        for i in range(3):
+
+            if i != 2:
+                y = torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), h) + \
+                    torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
+                    self.d_b[i](z_b[i])
+                # ruo.append(torch.sigmoid(self.layer_norm[i](y)))
+                ruo.append(torch.sigmoid(y))
+            else:
+                if self.add_mask:
+                    m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
+                    m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
+                    m_h = torch.sigmoid(m_h)
+                    m_x = torch.sigmoid(m_x)
+                    m_h_dist = td.Bernoulli(m_h)
+                    m_h_dist = td.Independent(m_h_dist, 2)
+                    m_x_dist = td.Bernoulli(m_x)
+                    m_x_dist = td.Independent(m_x_dist, 2)
+                    m_h_sample = m_h_dist.sample()
+                    m_x_sample = m_x_dist.sample()
+                    y = torch.tanh(
+                        torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]),
+                                     ruo[0] * h) + \
+                        torch.einsum('bij,bj->bi', m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
+                        self.d_b[i](z_b[i]))
+                else:
+
+                    m_h_dist = None
+                    m_x_dist = None
+                    m_h_sample = None
+                    m_x_sample = None
+                    y = torch.tanh(
+                        torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), ruo[0] * h) + \
+                        torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
+                        self.d_b[i](z_b[i]))
+
                 ruo.append(torch.tanh(y))
 
         r, u, o = ruo
         h_next = (1 - u) * h + u * o
 
         return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
+
 
 # Represents TD model in PlaNET
 class RSSM(nn.Module):
@@ -448,6 +478,7 @@ class RSSM(nn.Module):
                  hyper_size: int = 15,
                  n_z: int = 12,
                  simple_rnn: bool = False,
+                 add_mask: bool = False,
                  act: ActFunc = None):
         """Initializes RSSM
         Args:
@@ -468,13 +499,15 @@ class RSSM(nn.Module):
         self.n_z = n_z
         self.hyper_size = hyper_size
         self.simple_rnn = simple_rnn
+        self.add_mask = add_mask
         if act is None:
             self.act = nn.ELU
 
         self.obs1 = Linear(embed_size + deter, hidden)
         self.obs2 = Linear(hidden, 2 * stoch)
         self.cell = HyperGRUCell(input_size=self.hidden_size, hidden_size=self.deter_size,
-                                 hyper_size=self.hyper_size, n_z=self.n_z, simple_rnn=self.simple_rnn)
+                                 hyper_size=self.hyper_size, n_z=self.n_z, simple_rnn=self.simple_rnn,
+                                 add_mask=add_mask)
         self.img1 = Linear(stoch + action_size, hidden)
         self.img2 = Linear(deter, hidden)
         self.img3 = Linear(hidden, 2 * stoch)
@@ -544,7 +577,8 @@ class RSSM(nn.Module):
         posts = [[] for _ in range(len(state))]
         # [logp_x, entropy_x, logp_h, entropy_h]
         hyper_states = [[] for _ in range(len(hyper_state))]
-        masks = [[] for _ in range(4)]  # [logp_x, entropy_x, sample_x, logp_h, entropy_h, sample_h]
+        if self.add_mask:
+            masks = [[] for _ in range(4)]  # [logp_x, entropy_x, sample_x, logp_h, entropy_h, sample_h]
         last = (state, state)
         for index in range(len(action)):
             # Tuple of post and prior
@@ -553,17 +587,22 @@ class RSSM(nn.Module):
             [o.append(s) for s, o in zip(last[0], posts)]
             [o.append(s) for s, o in zip(last[1], priors)]
             [o.append(s) for s, o in zip(hyper_state, hyper_states)]
-            [o.append(s) for s, o in zip(mask, masks)]
+            if self.add_mask:
+                [o.append(s) for s, o in zip(mask, masks)]
 
         prior = [torch.stack(x, dim=0) for x in priors]
         post = [torch.stack(x, dim=0) for x in posts]
         hyper_state = [torch.stack(x, dim=0) for x in hyper_states]
-        mask = [torch.stack(x, dim=0) for x in masks]
 
         prior = [e.permute(1, 0, 2) for e in prior]
         post = [e.permute(1, 0, 2) for e in post]
         hyper_state = [e.permute(1, 0, 2) for e in hyper_state]
-        mask = [e.permute(1, 0) for e in mask]
+
+        if self.add_mask:
+            mask = [torch.stack(x, dim=0) for x in masks]
+            mask = [e.permute(1, 0) for e in mask]
+        else:
+            mask = [None for _ in range(4)]
 
         return post, prior, hyper_state, mask
 
@@ -590,7 +629,7 @@ class RSSM(nn.Module):
         indices = range(len(action))
         priors = [[] for _ in range(len(state))]
         hyper_states = [[] for _ in range(len(hyper_state))]
-        masks = [[] for _ in range(4)]  # [logp_x, entropy_x, sample_x, logp_h, entropy_h, sample_h]
+
         last_prior = state
         last_hyper = hyper_state
         for index in indices:
@@ -606,11 +645,11 @@ class RSSM(nn.Module):
         return prior, hyper_state
 
     def obs_step(
-            self, prev_state: TensorType,
-            prev_action: TensorType,
-            embed: TensorType,
-            hyper_state: List[TensorType])\
-            -> Tuple[List[TensorType], List[TensorType], List[TensorType], List[TensorType]]:
+        self, prev_state: TensorType,
+        prev_action: TensorType,
+        embed: TensorType,
+        hyper_state: List[TensorType]) \
+        -> Tuple[List[TensorType], List[TensorType], List[TensorType], List[TensorType]]:
         """Runs through the posterior model and returns the posterior state
         Args:
             prev_state (TensorType): The previous state
@@ -646,7 +685,7 @@ class RSSM(nn.Module):
         x = torch.cat([prev_state[2], prev_action], dim=-1)
         x = self.img1(x)
         x = self.act()(x)
-        deter, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample =\
+        deter, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample = \
             self.cell(x, prev_state[3], *hyper_state)  # x, h, h_hat, c_hat
         x = deter
         x = self.img2(x)
@@ -655,10 +694,15 @@ class RSSM(nn.Module):
         mean, std = torch.chunk(x, 2, dim=-1)
         std = self.softplus()(std) + 0.1
         stoch = self.get_dist(mean, std).rsample()
-        m_x_logp, m_x_entropy = m_x_dist.log_prob(m_x_sample), m_x_dist.entropy()
-        m_h_logp, m_h_entropy = m_h_dist.log_prob(m_h_sample), m_h_dist.entropy()
 
-        return [mean, std, stoch, deter],\
+        if self.add_mask:
+            m_x_logp, m_x_entropy = m_x_dist.log_prob(m_x_sample), m_x_dist.entropy()
+            m_h_logp, m_h_entropy = m_h_dist.log_prob(m_h_sample), m_h_dist.entropy()
+        else:
+            m_x_logp, m_x_entropy = None, None
+            m_h_logp, m_h_entropy = None, None
+
+        return [mean, std, stoch, deter], \
                [h_hat, c_hat], \
                [m_x_logp, m_x_entropy, m_h_logp, m_h_entropy]
         # [m_x_logp, m_x_entropy, m_x_sample, m_h_logp, m_h_entropy, m_h_sample]
@@ -691,7 +735,7 @@ class DreamerModel(TorchModelV2, nn.Module):
         self.decay = model_config['decay']
         self.simple_rnn = model_config['simple_rnn']
         self.hyper_in_state = model_config['hyper_in_state']
-
+        self.add_mask = model_config['add_mask']
 
         self.action_size = action_space.shape[0]
 
@@ -711,20 +755,24 @@ class DreamerModel(TorchModelV2, nn.Module):
             hidden=self.hidden_size,
             hyper_size=self.hyper_size,
             n_z=self.n_z,
-            simple_rnn=self.simple_rnn
-            )
-        self.actor = ActionDecoder(self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
-                                   self.action_size, 4, self.hidden_size)
-        self.value = DenseDecoder(self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size, 1, 3,
-                                  self.hidden_size)
+            simple_rnn=self.simple_rnn,
+            add_mask=self.add_mask
+        )
+        self.actor = ActionDecoder(
+            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
+            self.action_size, 4, self.hidden_size)
+        self.value = DenseDecoder(
+            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
+            1, 3,
+            self.hidden_size)
         self.state = None
 
-        self.ema = EMA(self.decay)#EMABatchTime(self.decay)
+        self.ema = EMA(self.decay)  if self.add_mask else None# EMABatchTime(self.decay)
         self.device = (torch.device("cuda")
                        if torch.cuda.is_available() else torch.device("cpu"))
 
     def policy(self, obs: TensorType, state: List[TensorType], explore=True
-                 ) -> Tuple[TensorType, List[float], List[TensorType]]:
+               ) -> Tuple[TensorType, List[float], List[TensorType]]:
         """Returns the action. Runs through the encoder, recurrent model,
         and policy to obtain action.
         """
@@ -733,7 +781,7 @@ class DreamerModel(TorchModelV2, nn.Module):
         else:
             self.state = state
 
-        #split states into it's three parts
+        # split states into it's three parts
         post = self.state[:4]
         hyper_state = self.state[4:-1]
         action = self.state[-1]
@@ -768,7 +816,6 @@ class DreamerModel(TorchModelV2, nn.Module):
             shpe = [-1] + list(s.size())[2:]
             start_hyper.append(s.view(*shpe))
 
-
         def next_state(state, hyper_state):
             feature = self.dynamics.get_feature(state, hyper_state if self.hyper_in_state else None).detach()
             action = self.actor(feature).rsample()
@@ -792,8 +839,8 @@ class DreamerModel(TorchModelV2, nn.Module):
     def get_initial_state(self) -> List[TensorType]:
         """Initial state consists of the initial state of the RSSM and the hyper network on top of it and action
                 """
-        self.state = self.dynamics.get_initial_state(1) + self.dynamics.get_initial_hyper_state(1) +\
-            [torch.zeros(1, self.action_space.shape[0]).to(self.device)]
+        self.state = self.dynamics.get_initial_state(1) + self.dynamics.get_initial_hyper_state(1) + \
+                     [torch.zeros(1, self.action_space.shape[0]).to(self.device)]
         return self.state
 
     def value_function(self) -> TensorType:

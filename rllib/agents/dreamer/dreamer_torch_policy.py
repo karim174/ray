@@ -66,21 +66,23 @@ def compute_dreamer_loss(obs,
     div = torch.mean(
         torch.distributions.kl_divergence(post_dist, prior_dist).sum(dim=2))
     div = torch.clamp(div, min=free_nats)
-    mask_logp_x, mask_entropy_x, mask_logp_h, mask_entropy_h = mask
-    mask_logp_x, mask_entropy_x, mask_logp_h, mask_entropy_h = mask
-    with torch.no_grad():
-        # reinf_reward = (image_pred.log_prob(obs)) + \
-        #                    reward_pred.log_prob(reward) # shape should be (batch, time)
-        reinf_reward = -(image_loss + reward_loss)  # weighted by the likelihood
-        reinforce_reward = reinf_reward.detach().clone()  # remove the rewards from the graph and clone them
-    reinforce_reward_ema = model.ema.update(reinforce_reward)
-    mask_logp = mask_logp_x + mask_logp_h
-    mask_reinforce_loss = -torch.mean((reinforce_reward - reinforce_reward_ema) * mask_logp)
-    mask_entropy_loss = -(torch.mean(mask_entropy_x) + torch.mean(mask_entropy_h))
+    if model.add_mask:
+        mask_logp_x, mask_entropy_x, mask_logp_h, mask_entropy_h = mask
+        with torch.no_grad():
+            # reinf_reward = (image_pred.log_prob(obs)) + \
+            #                    reward_pred.log_prob(reward) # shape should be (batch, time)
+            reinf_reward = -(image_loss + reward_loss)  # weighted by the likelihood
+            reinforce_reward = reinf_reward.detach().clone()  # remove the rewards from the graph and clone them
+        reinforce_reward_ema = model.ema.update(reinforce_reward)
+        mask_logp = mask_logp_x + mask_logp_h
+        mask_reinforce_loss = -torch.mean((reinforce_reward - reinforce_reward_ema) * mask_logp)
+        mask_entropy_loss = -(torch.mean(mask_entropy_x) + torch.mean(mask_entropy_h))
+
     image_loss = torch.mean(image_loss)
     reward_loss = torch.mean(reward_loss)
-    model_loss = kl_coeff * div + reward_loss + image_loss +\
-                 ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss
+    model_loss = kl_coeff * div + reward_loss + image_loss
+    if model.add_mask:
+        model_loss = model_loss + ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss
     # [imagine_horizon, batch_length*batch_size, feature_size]
     with torch.no_grad():
         actor_states = [v.detach() for v in post]

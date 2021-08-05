@@ -78,6 +78,7 @@ DEFAULT_CONFIG = with_common_config({
         "n_z": 9,
         "decay": 0.9,
         "simple_rnn": False,
+        "add_mask": False,
         "hyper_in_state": True
     },
 
