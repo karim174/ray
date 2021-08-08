@@ -29,7 +29,7 @@ class RDMCEnv(DMCEnv):
         sym_bodies = set(
             body.split('_', 1)[1] if body.find("_") != -1 else body for body in self.bodies)  # or seen_add(body))
         change_mask = self.rng.binomial(1, p=0.5, size=len(sym_bodies))
-        steps = np.arange(-0.25, 4.25, 0.25)
+        steps = np.arange(-0.25, 3.25, 0.25)
         steps = np.concatenate([steps[:int(np.where(steps == 0)[0])], steps[int(np.where(steps == 0)[0] + 1):]])
         change_values = self.rng.choice(steps, len(sym_bodies))
         change_factor = 1 + change_values * change_mask
@@ -61,7 +61,7 @@ class RDMCEnv(DMCEnv):
         sym_bodies = set(
             body.split('_', 1)[1] if body.find("_") != -1 else body for body in self.bodies)  # or seen_add(body))
         change_mask = self.rng.binomial(1, p=0.5, size=len(sym_bodies))
-        steps = np.arange(-0.25, 4.25, 0.25)
+        steps = np.arange(-0.25, 3.25, 0.25)
         steps = np.concatenate([steps[:int(np.where(steps == 0)[0])], steps[int(np.where(steps == 0)[0] + 1):]])
         change_values = self.rng.choice(steps, len(sym_bodies))
         change_factor = 1 + change_values * change_mask
