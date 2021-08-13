@@ -162,7 +162,11 @@ def log_summary(obs, action, embed, image_pred, model):
     init = [itm[:, -1] for itm in init]
     hyper_init = [itm[:, -1] for itm in hyper_init]
     prior, hyper = model.dynamics.imagine(action[:6, 5:], init, hyper_state=hyper_init)
-    openl = model.decoder(model.dynamics.get_feature(prior, hyper)).mean
+
+    if model.hyper_in_state:
+        openl = model.decoder(model.dynamics.get_feature(prior, hyper)).mean
+    else:
+        openl = model.decoder(model.dynamics.get_feature(prior)).mean
 
     mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
     error = (mod - truth + 1.0) / 2.0
