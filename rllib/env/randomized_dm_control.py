@@ -8,9 +8,6 @@ from ray.rllib.env.dm_control_wrapper import DMCEnv, MultiDMCEnv
 from ray.rllib.env.dm_control_wrapper import _flatten_obs
 from numpy.random import default_rng
 
-tasks = ['acrobot_swingup', 'walker_walk', 'hopper_hop',
-         'hopper_stand', 'cheetah_run', 'walker_run', 'pendulum_swingup',
-         'cartpole_swingup', 'humanoid_walk']
 
 class RDMCEnv(DMCEnv):
     def __init__(self,
@@ -25,9 +22,7 @@ class RDMCEnv(DMCEnv):
         This environment contains a randomized version of a certain intraclass system
         '''
 
-        task = random.choice(tasks)
-        dom_task = task.split('_')
-        super().__init__(dom_task, *args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         self.rng = default_rng()
         self.bodies = self._env.physics.named.model.body_mass._axes[0]._names[1:]
