@@ -116,7 +116,6 @@ class ARDMCEnv(MultiDMCEnv):
         self.orig_body_mass = []
         self.orig_geom_size = []
         self.approx_inv_density = []
-        print(self.tasks)
         for i, _ in enumerate(self.tasks):
 
             self.bodies.append(self._env[i].physics.named.model.body_mass._axes[0]._names[1:])
