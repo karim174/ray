@@ -261,7 +261,7 @@ def validate_config(config):
     if config["framework"] != "torch":
         raise ValueError("Dreamer not supported in Tensorflow yet!")
     if config["batch_mode"] != "complete_episodes":
-        raise ValueError("truncate_episodes not supported")
+        raise ValueError("truncate_episodes not supported yet!")
     if config["num_workers"] != 0:
         raise ValueError("Distributed Dreamer not supported yet!")
     if config["clip_actions"]:
