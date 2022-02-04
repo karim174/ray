@@ -48,8 +48,8 @@ if torch:
             super().__init__(*args, **kwargs)
 
         def reset_parameters(self):
-            nn.init.orthogonal_(self.weight_hh) #xavier_uniform_
-            nn.init.orthogonal_(self.weight_hh)
+            nn.init.xavier_uniform_(self.weight_hh) #xavier_uniform_
+            nn.init.xavier_uniform_(self.weight_hh)
             nn.init.zeros_(self.bias_ih)
             nn.init.zeros_(self.bias_hh)
 
