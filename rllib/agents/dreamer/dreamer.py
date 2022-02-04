@@ -33,7 +33,7 @@ DEFAULT_CONFIG = with_common_config({
     # Lambda
     "lambda": 0.95,
     # Clipping is done inherently via policy tanh.
-    "clip_ actions": False,
+    "clip_actions": False,
     # Training iterations per data collection from real env
     "dreamer_train_iters": 100,
     # Horizon for Enviornment (1000 for Mujoco/DMC)
