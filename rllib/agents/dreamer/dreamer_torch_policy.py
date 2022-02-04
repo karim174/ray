@@ -18,14 +18,16 @@ logger = logging.getLogger(__name__)
 def compute_dreamer_loss(obs,
                          action,
                          reward,
+                         init_mems,
                          model,
                          imagine_horizon,
-                         discount=0.99,
-                         lambda_=0.95,
-                         kl_coeff=1.0,
-                         ent_coeff=0.1,
-                         rei_coeff=1.0,
-                         free_nats=3.0,
+                         discount = 0.99,
+                         lambda_= 0.95,
+                         kl_coeff = 1.0,
+                         ent_coeff = 0.1,
+                         rei_coeff = 1.0,
+                         wc_coeff = 0.01,
+                         free_nats = 3.0,
                          log=False):
     """Constructs loss for the Dreamer objective
         Args:
@@ -39,6 +41,7 @@ def compute_dreamer_loss(obs,
             kl_coeff (float): KL Coefficient for Divergence loss in model loss
             ent_coeff(float): Mask Entropy Coefficient for Mask Entropy loss in model loss
             rei_coeff(float): Reinforce Coefficient for Reinforce loss in model loss
+            wc_coeff(float): Weight change Coefficient for limiting weight change in model loss
             free_nats (float): Threshold for minimum divergence in model loss
             log (bool): If log, generate gifs
         """
@@ -49,46 +52,75 @@ def compute_dreamer_loss(obs,
     critic_weights = list(model.value.parameters())
     model_weights = list(encoder_weights + decoder_weights + reward_weights +
                          dynamics_weights)
-
+    model.updated_mems = None
+    model.dynamics.cell.reset_cell()
     device = (torch.device("cuda")
               if torch.cuda.is_available() else torch.device("cpu"))
 
     # PlaNET Model Loss
     latent = model.encoder(obs)
-    post, prior, hyper_state, mask = model.dynamics.observe(latent, action)
-    features = model.dynamics.get_feature(post, hyper_state if model.hyper_in_state else None)
+    #shape got from buffer for init_mems is (batch, mem_tau, layers, dim)
+    out, memory_outs = model.trans(latent, init_mems.permute(2,0,1,3))
+
+    #post, prior, hyper_state, mask = model.dynamics.observe(latent, action)
+    #features = model.dynamics.get_feature(post, hyper_state if model.hyper_in_state else None)
+    posts, priors, pred_dstates, d_embeds, mask, weight_changes = model.dynamics.observe(action, out)
+    dstates_trans = out[:, -pred_dstates.size()[1]:, ...]
+    matching_loss = torch.norm(dstates_trans - pred_dstates, dim=-1).mean() #(1)
+
+    features = model.dynamics.get_feature(posts[-1], pred_dstates,
+                                          d_embeds if model.dembed_in_state else None)  # added features
+    features_t = model.dynamics.get_feature(posts[-1], dstates_trans,
+                                            d_embeds if model.dembed_in_state else None)  # added
     image_pred = model.decoder(features)
     reward_pred = model.reward(features)
-    image_loss = -image_pred.log_prob(obs)
-    reward_loss = -reward_pred.log_prob(reward)
-    prior_dist = model.dynamics.get_dist(prior[0], prior[1])
-    post_dist = model.dynamics.get_dist(post[0], post[1])
+    image_loss = -image_pred.log_prob(obs[:,model.ext_context:])
+    reward_loss = -reward_pred.log_prob(reward[:,model.ext_context:])
+
+    image_pred_t = model.decoder(features_t)
+    reward_pred_t = model.reward(features_t)
+    image_loss_t = -image_pred_t.log_prob(obs[:,model.ext_context:])
+    reward_loss_t = -reward_pred_t.log_prob(reward[:,model.ext_context:])
+
+    prior_dist = model.dynamics.get_dist(priors[0], priors[1])
+    post_dist = model.dynamics.get_dist(posts[0], posts[1])
     div = torch.mean(
         torch.distributions.kl_divergence(post_dist, prior_dist).sum(dim=2))
     div = torch.clamp(div, min=free_nats)
     if model.add_mask:
-        mask_logp_x, mask_entropy_x, mask_logp_h, mask_entropy_h = mask
+        mask_logp_w, mask_entropy_w = mask
         with torch.no_grad():
             # reinf_reward = (image_pred.log_prob(obs)) + \
             #                    reward_pred.log_prob(reward) # shape should be (batch, time)
             reinf_reward = -(image_loss + reward_loss)  # weighted by the likelihood
             reinforce_reward = reinf_reward.detach().clone()  # remove the rewards from the graph and clone them
         reinforce_reward_ema = model.ema.update(reinforce_reward)
-        mask_logp = mask_logp_x + mask_logp_h
+        mask_logp = mask_logp_w
         mask_reinforce_loss = -torch.mean((reinforce_reward - reinforce_reward_ema) * mask_logp)
-        mask_entropy_loss = -(torch.mean(mask_entropy_x) + torch.mean(mask_entropy_h))
+        mask_entropy_loss = -torch.mean(mask_entropy_w)
 
     image_loss = torch.mean(image_loss)
     reward_loss = torch.mean(reward_loss)
-    model_loss = kl_coeff * div + reward_loss + image_loss
+    image_loss_t = torch.mean(image_loss_t)
+    reward_loss_t = torch.mean(reward_loss_t)
+
+    weight_loss = wc_coeff*weight_changes if weight_changes is not None else 0
+    model_loss = kl_coeff * div + reward_loss + image_loss + reward_loss_t + image_loss_t + weight_loss
     if model.add_mask:
-        model_loss = model_loss + ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss
+        model_loss = model_loss + ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss + matching_loss \
+
+
     # [imagine_horizon, batch_length*batch_size, feature_size]
     with torch.no_grad():
-        actor_states = [v.detach() for v in post]
-        actor_hyper_states = [v.detach() for v in hyper_state]
+        actor_sstates = [v.detach() for v in posts]
+        actor_d_embeds = d_embeds.detach()
+        actor_pred_dstates = pred_dstates.detach()
+        actor_acts = action.detach()
+
     with FreezeParameters(model_weights):
-        imag_feat = model.imagine_ahead(actor_states, actor_hyper_states, imagine_horizon)
+        imag_feat = model.imagine_ahead(actor_sstates, actor_pred_dstates,
+                                        actor_acts, actor_d_embeds,
+                                        imagine_horizon)
     with FreezeParameters(model_weights + critic_weights):
         reward = model.reward(imag_feat).mean
         value = model.value(imag_feat).mean
@@ -114,20 +146,26 @@ def compute_dreamer_loss(obs,
     post_ent = torch.mean(post_dist.entropy())
 
     log_gif = None
+    #print(f'out shape of the transformer {out.size()}')
     if log:
-        log_gif = log_summary(obs, action, latent, image_pred, model)
+        log_gif = log_summary(obs, action, out, image_pred, model)
+
+    model.updated_mems = memory_outs
 
     return_dict = {
         "model_loss": model_loss,
         "reward_loss": reward_loss,
         "image_loss": image_loss,
+        "reward_loss_t": reward_loss_t,
+        "image_loss_t": image_loss_t,
+        "weight_changes": weight_changes,
         "divergence": div,
         "actor_loss": actor_loss,
         "critic_loss": critic_loss,
         "prior_ent": prior_ent,
         "post_ent": post_ent,
-        #"mask_ent_loss": mask_entropy_loss,
-        #"mask_reinforce_loss": mask_reinforce_loss
+        "mask_ent_loss": mask_entropy_loss if model.add_mask else 0,
+        "mask_reinforce_loss": mask_reinforce_loss if model.add_mask else 0
     }
 
     if log_gif is not None:
@@ -156,19 +194,30 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_):
 
 # Creates gif
 def log_summary(obs, action, embed, image_pred, model):
-    truth = obs[:6] + 0.5
-    recon = image_pred.mean[:6]
-    init, _, hyper_init, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5]) #fix
-    init = [itm[:, -1] for itm in init]
-    hyper_init = [itm[:, -1] for itm in hyper_init]
-    prior, hyper = model.dynamics.imagine(action[:6, 5:], init, hyper_state=hyper_init)
+    #print(f'log summary sizes obs is {obs.size()} action is {action.size()} image_pred is {image_pred.mean.size()}')
+    b_samp = min(6, obs.size(0))
+    truth = obs[:b_samp, -image_pred.mean.size()[1]:] + 0.5
+    recon = image_pred.mean[:b_samp]
+    init, _, init_dstates, _, _, _ = model.dynamics.observe(action[:b_samp, :model.ext_context+5],
+                                                            embed[:b_samp, :model.ext_context+5]) #fix
 
-    if model.hyper_in_state:
-        openl = model.decoder(model.dynamics.get_feature(prior, hyper)).mean
-    else:
-        openl = model.decoder(model.dynamics.get_feature(prior)).mean
+    #print(f'observe before the context extraction post shapes are {init[0].size()}')
+    #print(f'observe before the context extraction dstates shape ise {init_dstates.size()}')
+    init = [itm[:, -model.ext_context - 1:] for itm in init]
+    init_dstates = init_dstates[:, -model.ext_context - 1:]
+    #print(f'observe after the context extraction post shapes are {init[0].size()}')
+    #print(f'observe after the context extraction dstates shape ise {init_dstates.size()}')
+
+    priors, pred_dstates, d_embeds = model.dynamics.imagine(action[:b_samp, 5:], init, init_dstates) # shapes [model.ext_context+5:]
+    #print(f'after imagine prior shapes are {init[0].size()}')
+    #print(f'after imagine dstates shape is {init_dstates.size()}')
+    if model.dembed_in_state:
+        feats =model.dynamics.get_feature(priors[-1], pred_dstates,
+                                   d_embeds if model.dembed_in_state else None)
+        openl = model.decoder(feats).mean
 
     mod = torch.cat([recon[:, :5] + 0.5, openl + 0.5], 1)
+
     error = (mod - truth + 1.0) / 2.0
     return torch.cat([truth, mod, error], 3)
 
@@ -178,10 +227,12 @@ def dreamer_loss(policy, model, dist_class, train_batch):
     if "log_gif" in train_batch:
         log_gif = True
 
+
     policy.stats_dict = compute_dreamer_loss(
         train_batch["obs"],
         train_batch["actions"],
         train_batch["rewards"],
+        train_batch["mems"],
         policy.model,
         policy.config["imagine_horizon"],
         policy.config["discount"],
@@ -189,6 +240,7 @@ def dreamer_loss(policy, model, dist_class, train_batch):
         policy.config["kl_coeff"],
         policy.config["ent_coeff"],
         policy.config["rei_coeff"],
+        policy.config["wc_coeff"],
         policy.config["free_nats"],
         log_gif,
     )
@@ -222,7 +274,6 @@ def action_sampler_fn(policy, model, input_dict, state, explore, timestep):
     to incentivize exploration.
     """
     obs = input_dict["obs"]
-
     # Custom Exploration
     if timestep <= policy.config["prefill_timesteps"]:
         logp = [0.0]
@@ -234,12 +285,16 @@ def action_sampler_fn(policy, model, input_dict, state, explore, timestep):
         if len(state[0].size()) == 3:
             # Very hacky, but works on all envs
             state = model.get_initial_state()
+            print('init state called')
+        #print(f'time axis dim in state is {model.state_temp_dims}')
+        #state = feat_to_context(state, model.state_temp_dims)
+        #for i, s in enumerate(state):
+        #    print(f'state to context {i} dim is: {s.size()})')
         action, logp, state = model.policy(obs, state, explore)
         action = td.Normal(action, policy.config["explore_noise"]).sample()
         action = torch.clamp(action, min=-1.0, max=1.0)
 
     policy.global_timestep += policy.config["action_repeat"]
-
     return action, logp, state
 
 
@@ -272,4 +327,5 @@ DreamerTorchPolicy = build_torch_policy(
     stats_fn=dreamer_stats,
     make_model=build_dreamer_model,
     optimizer_fn=dreamer_optimizer_fn,
-    extra_grad_process_fn=apply_grad_clipping)
+    extra_grad_process_fn=apply_grad_clipping,
+    extra_learn_fetches_fn=lambda policy: {"updated_mems": policy.model.updated_mems.permute(1,2,0,3)})

@@ -1,16 +1,23 @@
 import numpy as np
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Optional, Union
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.framework import TensorType
+# from ray.rllib.models.torch.misc import SlimFC
+# from ray.rllib.models.torch.modules import GRUGate, SkipConnection
+# from ray.rllib.agents.dreamer.attention_modules import RelativeMultiHeadAttention
+from ray.rllib.agents.dreamer.attention_modules import GTrXLNet
+from ray.rllib.models.torch.recurrent_net import RecurrentNetwork
+from ray.rllib.utils.annotations import override
+
 
 torch, nn = try_import_torch()
 if torch:
     from torch import distributions as td
     from ray.rllib.agents.dreamer.utils import Linear, Conv2d, \
-        ConvTranspose2d, GRUCell, TanhBijector, LSTMCell
-
+        ConvTranspose2d, TanhBijector
 ActFunc = Any
+
 
 
 class Reshape(nn.Module):
@@ -78,7 +85,7 @@ class ConvEncoder(nn.Module):
         super().__init__()
         self.act = act
         if not act:
-            self.act = nn.ReLU
+            self.act = nn.ReLU #Relu
         self.depth = depth
         self.shape = shape
 
@@ -286,182 +293,107 @@ class ActionDecoder(nn.Module):
         return dist
 
 
-class HyperGRUCell(nn.Module):
+class HyperTranCell(nn.Module):
     """
     For HyperGRU the smaller network and the larger network is a GRU and the hyper network is a LSTM.
     """
 
     def __init__(self,
-                 input_size: int,
-                 hidden_size: int = 75,
-                 hyper_size: int = 15,
+                 action_size: int,
+                 deter_size: int,
+                 stoch_size: int,
                  n_z: int = 12,
-                 simple_rnn: bool = False,
-                 add_mask: bool = False):
+                 ext_context: int = 4,
+                 hidden_size: int = 128,
+                 add_mask: bool = True,
+                 w_cng_reg: bool = True):
         """
         Args:
-        input_size (int): Hidden size or $f_theta(s_{t-1}, a_{t-a})$
+        input_size (int): Hidden size or $f_theta(s_{t-1}, a_{t-1})$
         hidden_size (int): deter size of the base GRU
         hyper_size (int): size of the smaller LSTM that alters the weights of the larger outer GRU.
         n_z int(int): size of the feature vectors used to alter the GRU weights.
         """
 
         super().__init__()
-
-        self.hyper = LSTMCell(hidden_size + input_size, hyper_size)
-        self.simple_rnn = simple_rnn
         self.add_mask = add_mask
+        self.w_cng_reg = w_cng_reg
 
-        if simple_rnn:
-            # I feel that it's a typo.
-            self.z_h = nn.Linear(hyper_size, n_z)
-            self.z_x = nn.Linear(hyper_size, n_z)
+        # self.time_context = time_context
+        self.action_size = action_size
+        self.deter_size = deter_size
+        self.stoch_size = stoch_size
+        self.n_z = n_z
+        self.hidden_size = hidden_size
+        self.t_p_ext_context = ext_context + 1
 
-            if self.add_mask:
-                self.m_h = nn.Linear(hyper_size, n_z)
-                self.m_x = nn.Linear(hyper_size, n_z)
+        # combined z_hx
+        ads_size = self.action_size + self.deter_size + self.stoch_size
+        # print(ads_size, self.time_context)
+        self.z_ads = nn.Sequential(
+            nn.Linear(self.t_p_ext_context * ads_size, self.hidden_size),
+            nn.ELU(),
+            nn.Linear(self.hidden_size, self.hidden_size),
+            nn.ELU(),
+            nn.Linear(self.hidden_size, self.n_z),
+        )
 
-            self.z_b = nn.Linear(hyper_size, n_z, bias=False)
-            self.d_b = nn.Linear(n_z, hidden_size)
-
-            # Single parameters are listed (in a ParameterList) to be registered in the model parameters
-            self.w_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
-            self.w_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
-
-            if self.add_mask:
-                self.w_m_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
-                self.w_m_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
-
-        else:
-            self.z_h = nn.Linear(hyper_size, 3 * n_z)
-            self.z_x = nn.Linear(hyper_size, 3 * n_z)
-
-            self.z_b = nn.Linear(hyper_size, 3 * n_z, bias=False)
-            d_b = [nn.Linear(n_z, hidden_size) for _ in range(3)]
-            self.d_b = nn.ModuleList(d_b)
-
-            self.w_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z)) for _ in range(3)])
-            self.w_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z)) for _ in range(3)])
-
-            self.m_h = nn.Linear(hyper_size, n_z) if self.add_mask else None
-            self.m_x = nn.Linear(hyper_size, n_z) if self.add_mask else None
-            self.w_m_h = nn.ParameterList(
-                [nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))]) if self.add_mask else None
-            self.w_m_x = nn.ParameterList(
-                [nn.Parameter(torch.zeros(hidden_size, input_size, n_z))]) if self.add_mask else None
-
-        for param in self.w_h:
-            nn.init.orthogonal_(param)
-        for param in self.w_x:
-            nn.init.orthogonal_(param)
-
-        if add_mask:
-            for param in self.w_m_h:
-                nn.init.orthogonal(param)
-            for param in self.w_m_x:
-                nn.init.orthogonal(param)
-        # Layer normalization
-        # self.layer_norm = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(3)])
-        # self.layer_norm_c = nn.LayerNorm(hidden_size)
+        self.offset_layer = nn.Linear(self.t_p_ext_context * ads_size, 1, bias=False)  #, self.deter_size, bias=False) # bias was True
+        w_m_ads = [torch.zeros(self.deter_size, ads_size, n_z) for _ in
+                   range(2 if self.add_mask else 1)]  # self.t_p_ext_context*ads_size
+        w_m_ads = tuple([nn.init.xavier_normal_(w) for w in w_m_ads])  # shouldn't be like that orthogonal_ xavier_normal_
+        self.w_m_ads = nn.ParameterList([nn.Parameter(torch.cat(w_m_ads))])
+        self.prev_w = None
 
     def forward(self,
-                x: torch.Tensor,
-                h: torch.Tensor,
-                h_hat: torch.Tensor,
-                c_hat: torch.Tensor):
+                s: torch.Tensor,
+                a: torch.Tensor,
+                d: torch.Tensor,
+                ):
         # print('debugging in hypercell x and h shapes are ', x.shape, h.shape)
-        x_hat = torch.cat((h, x), dim=-1)
-        h_hat, c_hat = self.hyper(x_hat, [h_hat, c_hat])
+        # TODO(karim): fix this
+        a_context = a  # [:, -self.time_context:]
+        d_context = d  # [:, -self.time_context:]
+        s_context = s  # [:, -self.time_context:]
+        ads_context_wt = torch.cat((a_context, d_context, s_context), dim=-1)
+        ads_context = ads_context_wt.view(-1, np.prod(ads_context_wt.size()[1:]))
 
-        if self.simple_rnn:
-
-            z_h = self.z_h(h_hat)
-            z_x = self.z_x(h_hat)
-            z_b = self.z_b(h_hat)
-            if self.add_mask:
-                m_h = self.m_h(h_hat)
-                m_x = self.m_x(h_hat)
-                m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
-                m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
-                m_h = torch.sigmoid(m_h)
-                m_x = torch.sigmoid(m_x)
-                m_h_dist = td.Bernoulli(m_h)
-                m_h_dist = td.Independent(m_h_dist, 2)
-                m_x_dist = td.Bernoulli(m_x)
-                m_x_dist = td.Independent(m_x_dist, 2)
-                m_h_sample = m_h_dist.sample()
-                m_x_sample = m_x_dist.sample()
-                h_next = torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
-                         torch.einsum('bij,bj->bi', m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
-                         self.d_b(z_b)
-            else:
-                m_h_dist = None
-                m_x_dist = None
-                m_h_sample = None
-                m_x_sample = None
-                h_next = torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
-                         torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
-                         self.d_b(z_b)
-
-            return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
-
-        z_h = self.z_h(h_hat).chunk(3, dim=-1)
-        z_x = self.z_x(h_hat).chunk(3, dim=-1)
-        z_b = self.z_b(h_hat).chunk(3, dim=-1)
-
+        z_ads = self.z_ads(
+            ads_context)  # contains mask, and every feature. just chunk for the masks (last two dimensions)
+        offset = self.offset_layer(ads_context)
+        all_weights = torch.einsum('ijk,bk->bij', self.w_m_ads[0], z_ads)/np.sqrt(z_ads.size(1))
+        # split weights ru for x and h, o for x and h, mask_weight x and h
         if self.add_mask:
-            m_h = self.m_h(h_hat)
-            m_x = self.m_x(h_hat)
+            o_weights, m_weights = torch.split(all_weights,
+                                               (self.deter_size, self.deter_size),
+                                               dim=1)
+            m_w = torch.sigmoid(m_weights)
+            m_w_dist = td.Bernoulli(m_w)
+            m_w_dist = td.Independent(m_w_dist, 2)
+            m_w_sample = m_w_dist.sample()
+        else:
+            o_weights = all_weights
 
-        # We calculate $r$, $u$, and $o$ in a loop
-        ruo = []
-        for i in range(3):
-
-            if i != 2:
-                y = torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), h) + \
-                    torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                    self.d_b[i](z_b[i])
-                # ruo.append(torch.sigmoid(self.layer_norm[i](y)))
-                ruo.append(torch.sigmoid(y))
-            else:
-                if self.add_mask:
-                    m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
-                    m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
-                    m_h = torch.sigmoid(m_h)
-                    m_x = torch.sigmoid(m_x)
-                    m_h_dist = td.Bernoulli(m_h)
-                    m_h_dist = td.Independent(m_h_dist, 2)
-                    m_x_dist = td.Bernoulli(m_x)
-                    m_x_dist = td.Independent(m_x_dist, 2)
-                    m_h_sample = m_h_dist.sample()
-                    m_x_sample = m_x_dist.sample()
-                    y = torch.tanh(
-                        torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]),
-                                     ruo[0] * h) + \
-                        torch.einsum('bij,bj->bi', m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                        self.d_b[i](z_b[i]))
-                else:
-
-                    m_h_dist = None
-                    m_x_dist = None
-                    m_h_sample = None
-                    m_x_sample = None
-                    y = torch.tanh(
-                        torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), ruo[0] * h) + \
-                        torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                        self.d_b[i](z_b[i]))
-
-                ruo.append(torch.tanh(y))
-
-        r, u, o = ruo
-        h_next = (1 - u) * h + u * o
-
-        return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
+        curr_w = o_weights * m_w_sample if self.add_mask else o_weights
+        # print(torch.einsum('bij,bj->bi',  curr_w, ads_context).size(), d_context[:, -1, :] .size(), offset.size())
 
 
-# Represents TD model in PlaNET
-class RSSM(nn.Module):
-    """RSSM is the core recurrent part of the PlaNET module. It consists of
+        d_next =  torch.sigmoid(offset)*torch.einsum('bij,bj->bi',
+                                      curr_w, ads_context_wt[:, -1, :])/np.sqrt(ads_context_wt[:, -1, :].size(1)) \
+                                        + d_context[:, -1, :]
+        mask_o = (m_w_dist, m_w_sample) if self.add_mask else (None, None)
+        weight_change = torch.mean(
+            torch.norm(self.prev_w - curr_w, dim=(1, 2))) if self.w_cng_reg and self.prev_w is not None else None
+        self.prev_w = curr_w
+        output = d_next, z_ads, *mask_o, weight_change
+        return output
+
+    def reset_cell(self):
+        self.prev_w = None
+
+
+class TSSM(nn.Module):
+    """TSSM is the core recurrent part of the Hyper dreamer module. It consists of
     two networks, one (obs) to calculate posterior beliefs and states and
     the second (img) to calculate prior beliefs and states. The prior network
     takes in the previous state and action, while the posterior network takes
@@ -471,248 +403,304 @@ class RSSM(nn.Module):
 
     def __init__(self,
                  action_size: int,
-                 embed_size: int,
-                 stoch: int = 30,
-                 deter: int = 200,
-                 hidden: int = 200,
-                 hyper_size: int = 15,
+                 stoch_size: int = 30,
+                 deter_size: int = 200,
+                 hidden_size: int = 200,
                  n_z: int = 12,
-                 simple_rnn: bool = False,
+                 ext_context: int = 4,
                  add_mask: bool = False,
+                 w_cng_reg: bool = False,
                  act: ActFunc = None):
         """Initializes RSSM
         Args:
             action_size (int): Action space size
-            embed_size (int): Size of ConvEncoder embedding
-            stoch (int): Size of the distributional hidden state
-            deter (int): Size of the deterministic hidden state
-            hidden (int): General size of hidden layers
-            hyper_size (int): The hidden size of the Hypernet
+            stoch_size (int): Size of the distributional hidden state
+            deter_size (int): Size of the deterministic hidden state
+            hidden_size (int): General size of hidden layers
             n_z (int): embedding size of the Hypernet
+            ext_context (int): extended timesteps to add for dynamics
+            add_mask (bool): whether to add a sparsity mask or not
+            w_cng_reg (bool): penalizer on weight changes
             act (Any): Activation function
         """
         super().__init__()
-        self.stoch_size = stoch
-        self.deter_size = deter
-        self.hidden_size = hidden
         self.act = act
         self.n_z = n_z
-        self.hyper_size = hyper_size
-        self.simple_rnn = simple_rnn
+
         self.add_mask = add_mask
+        self.w_cng_reg = w_cng_reg
+
+        self.ext_context = ext_context
+        self.action_size = action_size
+        self.deter_size = deter_size
+        self.stoch_size = stoch_size
+        self.n_z = n_z
+        self.hidden_size = hidden_size
+
         if act is None:
             self.act = nn.ELU
 
-        self.obs1 = Linear(embed_size + deter, hidden)
-        self.obs2 = Linear(hidden, 2 * stoch)
-        self.cell = HyperGRUCell(input_size=self.hidden_size, hidden_size=self.deter_size,
-                                 hyper_size=self.hyper_size, n_z=self.n_z, simple_rnn=self.simple_rnn,
-                                 add_mask=add_mask)
-        self.img1 = Linear(stoch + action_size, hidden)
-        self.img2 = Linear(deter, hidden)
-        self.img3 = Linear(hidden, 2 * stoch)
+        self.obs1 = Linear(2 * deter_size, hidden_size)
+        self.obs2 = Linear(hidden_size, 2 * stoch_size)
+        self.cell = HyperTranCell(action_size=self.action_size,
+                                  deter_size=self.deter_size,
+                                  stoch_size=self.stoch_size,
+                                  n_z=self.n_z,
+                                  ext_context=self.ext_context,
+                                  hidden_size=self.hidden_size,
+                                  add_mask=self.add_mask,
+                                  w_cng_reg=self.w_cng_reg)
+
+        self.img1 = Linear(deter_size, hidden_size)
+        self.img2 = Linear(hidden_size, 2 * stoch_size)
 
         self.softplus = nn.Softplus
 
         self.device = (torch.device("cuda")
                        if torch.cuda.is_available() else torch.device("cpu"))
 
-    def get_initial_state(self, batch_size: int) -> List[TensorType]:
-        """Returns the inital state for the RSSM, which consists of mean,
+    def get_initial_sstates(self, batch_size: int) -> List[TensorType]:
+        """Returns the stoch state for the TSSM, which consists of mean,
         std for the stochastic state, the sampled stochastic hidden state
-        (from mean, std), and the deterministic hidden state, which is
-        pushed through the GRUCell.
+        (from mean, std) for a selected ext_context + 1
         Args:
             batch_size (int): Batch size for initial state
         Returns:
             List of tensors
         """
         return [
-            torch.zeros(batch_size, self.stoch_size).to(self.device),
-            torch.zeros(batch_size, self.stoch_size).to(self.device),
-            torch.zeros(batch_size, self.stoch_size).to(self.device),
-            torch.zeros(batch_size, self.deter_size).to(self.device),
+            torch.zeros(batch_size, 1 + self.ext_context,
+                        self.stoch_size).to(self.device),
+            torch.zeros(batch_size, 1 + self.ext_context,
+                        self.stoch_size).to(self.device),
+            torch.zeros(batch_size, 1 + self.ext_context,
+                        self.stoch_size).to(self.device),
         ]
 
-    def get_initial_hyper_state(self, batch_size: int) -> List[TensorType]:
-        """the hyper hidden state, and the hyper cell state.
+    def get_initial_dstates(self, batch_size: int) -> List[TensorType]:
+        """the initial deterministic states for a selected ext_context.
         Args:
             batch_size (int): Batch size for initial state
         Returns:
-            List of tensors
+            tensor
         """
-        return [
-            torch.zeros(batch_size, self.hyper_size).to(self.device),
-            torch.zeros(batch_size, self.hyper_size).to(self.device),
-        ]
+        return torch.zeros(batch_size, 1 + self.ext_context,
+                           self.deter_size).to(self.device)
 
     def observe(self,
-                embed: TensorType,
-                action: TensorType,
-                state: List[TensorType] = None,
-                hyper_state: List[TensorType] = None
-                ) -> Tuple[List[TensorType], List[TensorType], List[TensorType], List[TensorType]]:
+                # embeds: TensorType,
+                actions: TensorType,
+                dstates: TensorType,
+                sstates: List[TensorType] = None,
+                ) -> Tuple[List[TensorType], List[TensorType], TensorType,
+                           TensorType, List[TensorType], TensorType]:
         """Returns the corresponding states from the embedding from ConvEncoder
-        and actions. This is accomplished by rolling out the RNN from the
-        starting state through each index of embed and action, saving all
-        intermediate states between.
+        and actions. This is accomplished by rolling out the HyperTran from
+        the starting state through each index of embed, dstatates and action,
+        saving all intermediate states between. The functions also returns
+        the predicted dstates from the estimated dynamics in hypertran, which
+        are incentivized to be similar to dstates from the transformer.
         Args:
-            embed (TensorType): ConvEncoder embedding
-            action (TensorType): Actions
-            state (List[TensorType]): Initial state before rollout
-            hyper_state (List[TensorType]): Initial hyper_states before rollout
+            actions (TensorType): Actions (T+ext_context) from episodic buffer
+            dstates (TensorType): from the transformer (T+ext_context) from
+            episodic buffer. (acts as a spatiotemporal embeddings of current obs)
+            sstates (List[TensorType]): Initial state (ext_context+1) before
+            rollout
+
         Returns:
-            Posterior states, prior states, hyper states, and masks (all List[TensorType])
+            Posterior sstates, prior sstates, pred dstates,
+            masks, weight changes (sstates and mask are List[TensorType]
+            others are tensors)
         """
-        if state is None:
-            state = self.get_initial_state(action.size()[0])
+        act_size = actions.size()  # B, T + ext_context, act_dim
+        self.cell.reset_cell()  # reset cell pre observe
 
-        if hyper_state is None:
-            hyper_state = self.get_initial_hyper_state(action.size()[0])
+        if sstates is None:
+            sstates = self.get_initial_sstates(act_size[0])
 
-        embed = embed.permute(1, 0, 2)
-        action = action.permute(1, 0, 2)
+        priors_w_inits = sstates
+        posts_w_inits = sstates
+        weight_changes = [] if self.w_cng_reg else None
 
-        priors = [[] for _ in range(len(state))]
-        posts = [[] for _ in range(len(state))]
-        # [logp_x, entropy_x, logp_h, entropy_h]
-        hyper_states = [[] for _ in range(len(hyper_state))]
         if self.add_mask:
-            masks = [[] for _ in range(4)]  # [logp_x, entropy_x, sample_x, logp_h, entropy_h, sample_h]
-        last = (state, state)
-        for index in range(len(action)):
+            masks = [[] for _ in range(2)]  # [ logp_w, entropy_w]
+
+        pred_dstates = []
+        d_embeds = []
+        last = (sstates, sstates)
+
+        next_dstates = dstates[:, self.ext_context:]
+        # to train good HC bias
+        init_dstate = torch.zeros(act_size[0], 1, self.deter_size).to(self.device)
+        #print(f'init_dstate {init_dstate.size()} and dstates size is {dstates.size()}')
+        prev_dstates = torch.cat((init_dstate, dstates), dim=1)[:, :-1, ...]
+
+        for index in range(act_size[1] - self.ext_context):
             # Tuple of post and prior
-            post, prior, hyper_state, mask = self.obs_step(last[0], action[index], embed[index], hyper_state)
-            last = [post, prior]
-            [o.append(s) for s, o in zip(last[0], posts)]
-            [o.append(s) for s, o in zip(last[1], priors)]
-            [o.append(s) for s, o in zip(hyper_state, hyper_states)]
+            last_acts = actions[:, index:index + self.ext_context + 1, ...]
+            last_dstates = prev_dstates[:, index:index + self.ext_context + 1, ...]
+
+            last_post, last_prior, last_d, d_embed, mask, weight_change = \
+                self.obs_step(last[0], last_acts, last_dstates, next_dstates[:, index, ...])
+            priors_w_inits = [torch.cat((s, o[:, None, ...]), dim=1)
+                              for s, o in zip(priors_w_inits, last_prior)]
+            posts_w_inits = [torch.cat((s, o[:, None, ...]), dim=1)
+                             for s, o in zip(posts_w_inits, last_post)]
+
+            last_priors = [s[:, -self.ext_context - 1:, ...] for s in priors_w_inits]
+            last_posts = [s[:, -self.ext_context - 1:, ...] for s in posts_w_inits]
+            last = (last_priors, last_posts)
+
             if self.add_mask:
                 [o.append(s) for s, o in zip(mask, masks)]
 
-        prior = [torch.stack(x, dim=0) for x in priors]
-        post = [torch.stack(x, dim=0) for x in posts]
-        hyper_state = [torch.stack(x, dim=0) for x in hyper_states]
+            pred_dstates.append(last_d)
+            d_embeds.append(d_embed)
 
-        prior = [e.permute(1, 0, 2) for e in prior]
-        post = [e.permute(1, 0, 2) for e in post]
-        hyper_state = [e.permute(1, 0, 2) for e in hyper_state]
+            if self.w_cng_reg:
+                weight_changes.append(weight_change)
+
+        # remove inits from priors and posts
+        priors = [x[:, self.ext_context + 1:] for x in priors_w_inits]
+        posts = [x[:, self.ext_context + 1:] for x in posts_w_inits]
+        pred_dstates = torch.stack(pred_dstates, dim=1)
+        d_embeds = torch.stack(d_embeds, dim=1)
+        assert pred_dstates.size() == dstates[:, self.ext_context:].size()
+
+        if self.w_cng_reg:
+            weight_changes = torch.stack(weight_changes[1:], dim=0)
+            weight_changes = torch.mean(weight_changes)
 
         if self.add_mask:
-            mask = [torch.stack(x, dim=0) for x in masks]
-            mask = [e.permute(1, 0) for e in mask]
+            mask = [torch.stack(x, dim=1) for x in masks]
         else:
-            mask = [None for _ in range(4)]
+            mask = [None for _ in range(2)]
 
-        return post, prior, hyper_state, mask
+        return posts, priors, pred_dstates, d_embeds, mask, weight_changes
 
-    def imagine(self, action: TensorType,
-                state: List[TensorType] = None,
-                hyper_state: List[TensorType] = None) -> Tuple[List[TensorType], List[TensorType], List[TensorType]]:
+    def imagine(self, actions: TensorType,
+                sstates: List[TensorType] = None,
+                dstates: TensorType = None) \
+        -> Tuple[List[TensorType], List[TensorType], List[TensorType]]:
         """Imagines the trajectory starting from state through a list of actions.
         Similar to observe(), requires rolling out the RNN for each timestep.
         Args:
-            action (TensorType): Actions
-            state (List[TensorType]): Starting state before rollout
-            hyper_state (List[TensorType]): starting hyper_state before rollout
+            actions (TensorType): Actions (T+ext_context)
+            sstates (List[TensorType]): Starting ext_context+1 sstate before rollout
+            dstates (TensorType): starting ext_context+1 dstates before rollout
         Returns:
             Prior states, hyper_states masks
         """
-        if state is None:
-            state = self.get_initial_state(action.size()[0])
+        act_size = actions.size()
+        self.cell.reset_cell()
+        if sstates is None:
+            sstates = self.get_initial_sstates(act_size[0])
 
-        if hyper_state is None:
-            hyper_state = self.get_initial_hyper_state(action.size()[0])
+        if dstates is None:
+            dstates = self.get_initial_dstates(act_size[0])
 
-        action = action.permute(1, 0, 2)
+        priors_w_inits = sstates
+        dstates_w_inits = dstates
 
-        indices = range(len(action))
-        priors = [[] for _ in range(len(state))]
-        hyper_states = [[] for _ in range(len(hyper_state))]
+        last_priors = sstates
+        last_dstates = dstates
+        d_embeds = []
 
-        last_prior = state
-        last_hyper = hyper_state
-        for index in indices:
-            last_prior, last_hyper, mask = self.img_step(last_prior, action[index], last_hyper)
-            [o.append(s) for s, o in zip(last_prior, priors)]
-            [o.append(s) for s, o in zip(last_hyper, hyper_states)]
+        for index in range(act_size[1] - self.ext_context):
+            last_acts = actions[:, index:index + self.ext_context + 1, ...]
+            last_prior, last_d, d_embed, _, _ = self.img_step(last_priors,
+                                                              last_acts, last_dstates)
 
-        prior = [torch.stack(x, dim=0) for x in priors]
-        hyper_state = [torch.stack(x, dim=0) for x in hyper_states]
-        prior = [e.permute(1, 0, 2) for e in prior]
-        hyper_state = [e.permute(1, 0, 2) for e in hyper_state]
+            priors_w_inits = [torch.cat((s, o[:, None, ...]), dim=1)
+                              for s, o in zip(priors_w_inits, last_prior)]
+            dstates_w_inits = torch.cat((dstates_w_inits, last_d[:, None, ...])
+                                        , dim=1)
 
-        return prior, hyper_state
+            # should contain 1+ext context elements
+            last_priors = [s[:, -self.ext_context - 1:, ...] for s in priors_w_inits]
+            last_dstates = dstates_w_inits[:, -self.ext_context - 1:, ...]
+            d_embeds.append(d_embed)
+
+        d_embeds = torch.stack(d_embeds, dim=1)
+        priors = [x[:, self.ext_context + 1:] for x in priors_w_inits]
+        dstates = dstates_w_inits[:, self.ext_context + 1:]
+
+        return priors, dstates, d_embeds
 
     def obs_step(
-        self, prev_state: TensorType,
-        prev_action: TensorType,
-        embed: TensorType,
-        hyper_state: List[TensorType]) \
-        -> Tuple[List[TensorType], List[TensorType], List[TensorType], List[TensorType]]:
+        self,
+        prev_sstates: List[TensorType],
+        prev_acts: TensorType,
+        prev_dstates: TensorType,
+        next_dstate: TensorType) \
+        -> Tuple[List[TensorType], List[TensorType],
+                 TensorType, TensorType, List[TensorType], TensorType]:
         """Runs through the posterior model and returns the posterior state
         Args:
-            prev_state (TensorType): The previous state
-            prev_action (TensorType): The previous action
+            prev_sstates ((List[TensorType]): The previous ext_context+1 state (mu, sigma, sample)
+            prev_acts (TensorType): The previous ext_context+1 actions
+            prev_dstates (TensorType): the previous ext_context+1 dstates
+            nex_dstate (TensorType): the next dstate as a spatio temporal embedding
             embed (TensorType): Embedding from ConvEncoder
-            hyper_states (List[TensorType]): previous hyper_states
         Returns:
             Post, Prior, Hyper state, Mask
       """
-        prior, hyper_state, mask = self.img_step(prev_state, prev_action, hyper_state)
-        x = torch.cat([prior[3], embed], dim=-1)
+        prior, next_d, d_embed, mask, weight_change = self.img_step(prev_sstates,
+                                                                    prev_acts, prev_dstates)
+        # here we have two options either using next_d from im_step or from dstates
+        x = torch.cat([next_d, next_dstate], dim=-1)  # highly correlated
         x = self.obs1(x)
         x = self.act()(x)
         x = self.obs2(x)
         mean, std = torch.chunk(x, 2, dim=-1)
         std = self.softplus()(std) + 0.1
         stoch = self.get_dist(mean, std).rsample()
-        post = [mean, std, stoch, prior[3]]
-        return post, prior, hyper_state, mask
+        post = [mean, std, stoch]
+        return post, prior, next_d, d_embed, mask, weight_change
 
-    def img_step(self, prev_state: List[TensorType],
-                 prev_action: TensorType,
-                 hyper_state: List[TensorType]) -> Tuple[List[TensorType], List[TensorType], List[TensorType]]:
-        """Runs through the prior model and returns the prior state
+    def img_step(self, prev_sstates: List[TensorType],
+                 prev_acts: TensorType,
+                 prev_dstates: TensorType
+                 ) \
+        -> Tuple[List[TensorType], TensorType, TensorType, List[TensorType], TensorType]:
+        """Runs through the prior model and returns the prior state and next
+        diff
         Args:
-            prev_state (TensorType): The previous state
-            prev_action (TensorType): The previous action
-            hyper_states (List[TensorType]): previous hyper_states
+            prev_sstates ((List[TensorType]): The previous stoch.
+            states (mu, sigma, sample) 1+ext_context
+            prev_acts (TensorType): The previous 1+ext_context action
+            prev_dstates (TensorType): The previous 1+ext_context deter. states
         Returns:
             Prior state
         """
+        # with at least 1 in the time dimension for prev s.a.d.
+        next_d, d_embed, m_w_dist, m_w_sample, weight_change = \
+            self.cell(prev_sstates[2], prev_acts, prev_dstates)
 
-        x = torch.cat([prev_state[2], prev_action], dim=-1)
+        x = next_d
         x = self.img1(x)
         x = self.act()(x)
-        deter, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample = \
-            self.cell(x, prev_state[3], *hyper_state)  # x, h, h_hat, c_hat
-        x = deter
         x = self.img2(x)
-        x = self.act()(x)
-        x = self.img3(x)
         mean, std = torch.chunk(x, 2, dim=-1)
         std = self.softplus()(std) + 0.1
         stoch = self.get_dist(mean, std).rsample()
-
         if self.add_mask:
-            m_x_logp, m_x_entropy = m_x_dist.log_prob(m_x_sample), m_x_dist.entropy()
-            m_h_logp, m_h_entropy = m_h_dist.log_prob(m_h_sample), m_h_dist.entropy()
+            m_w_logp, m_w_entropy = m_w_dist.log_prob(m_w_sample), m_w_dist.entropy()
         else:
-            m_x_logp, m_x_entropy = None, None
-            m_h_logp, m_h_entropy = None, None
+            m_w_logp, m_w_entropy = None, None
+        return [mean, std, stoch], \
+               next_d, \
+               d_embed, \
+               [m_w_logp, m_w_entropy], \
+               weight_change
 
-        return [mean, std, stoch, deter], \
-               [h_hat, c_hat], \
-               [m_x_logp, m_x_entropy, m_h_logp, m_h_entropy]
-        # [m_x_logp, m_x_entropy, m_x_sample, m_h_logp, m_h_entropy, m_h_sample]
-
-    def get_feature(self, state: List[TensorType], hyper_state: List[TensorType] = None) -> TensorType:
+    def get_feature(self, sample_sstate,
+                    dstate, d_embed: TensorType = None) -> TensorType:
         # Constructs feature for input to reward, decoder, actor, critic
-        if hyper_state is not None:
-            return torch.cat([state[2], state[3], hyper_state[0]], dim=-1)
+        if d_embed is not None:
+            return torch.cat([sample_sstate, dstate, d_embed], dim=-1)
         else:
-            return torch.cat([state[2], state[3]], dim=-1)
+            return torch.cat([sample_sstate, dstate], dim=-1)
 
     def get_dist(self, mean: TensorType, std: TensorType) -> TensorType:
         return td.Normal(mean, std)
@@ -730,65 +718,131 @@ class DreamerModel(TorchModelV2, nn.Module):
         self.deter_size = model_config["deter_size"]
         self.stoch_size = model_config["stoch_size"]
         self.hidden_size = model_config["hidden_size"]
-        self.hyper_size = model_config['hyper_size']
         self.n_z = model_config['n_z']
         self.decay = model_config['decay']
-        self.simple_rnn = model_config['simple_rnn']
-        self.hyper_in_state = model_config['hyper_in_state']
+        self.dembed_in_state = model_config['dembed_in_state']
         self.add_mask = model_config['add_mask']
+        self.w_cng_reg = model_config['w_cng_reg']
+        self.ext_context = model_config['ext_context']
+        self.num_transformer_units = model_config['num_transformer_units']
+        self.num_heads = model_config['num_heads']
+        self.atten_size = model_config['atten_size']
+        self.memory_tau = model_config['memory_tau']
 
         self.action_size = action_space.shape[0]
+        dembed_add_dim = self.n_z if self.dembed_in_state else 0
 
         self.encoder = ConvEncoder(self.depth)
         self.decoder = ConvDecoder(
-            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
+            self.stoch_size + self.deter_size + dembed_add_dim,
             depth=self.depth)
         self.reward = DenseDecoder(
-            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
+            self.stoch_size + self.deter_size + dembed_add_dim,
             1, 2,
             self.hidden_size)
-        self.dynamics = RSSM(
-            self.action_size,
-            32 * self.depth,
-            stoch=self.stoch_size,
-            deter=self.deter_size,
-            hidden=self.hidden_size,
-            hyper_size=self.hyper_size,
-            n_z=self.n_z,
-            simple_rnn=self.simple_rnn,
-            add_mask=self.add_mask
-        )
-        self.actor = ActionDecoder(
-            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
-            self.action_size, 4, self.hidden_size)
-        self.value = DenseDecoder(
-            self.stoch_size + self.deter_size + self.hyper_size if self.hyper_in_state else self.stoch_size + self.deter_size,
-            1, 3,
-            self.hidden_size)
+
+        self.dynamics = TSSM(self.action_size,
+                             stoch_size=self.stoch_size,
+                             deter_size=self.deter_size,
+                             hidden_size=self.hidden_size,
+                             n_z=self.n_z,
+                             ext_context=self.ext_context,
+                             add_mask=self.add_mask,
+                             w_cng_reg=self.w_cng_reg
+                             )
+        self.trans = GTrXLNet(input_dim=32 * self.depth,
+                              output_dim=self.deter_size,
+                              action_dim=self.action_size,
+                              attention_dim=self.atten_size,
+                              num_transformer_units=self.num_transformer_units,
+                              num_heads=self.num_heads,
+                              memory_inference=self.memory_tau,
+                              memory_training=self.memory_tau)
+
+        self.actor = ActionDecoder(self.stoch_size + self.deter_size +
+                                   dembed_add_dim,
+                                   self.action_size, 4, self.hidden_size)
+        self.value = DenseDecoder(self.stoch_size + self.deter_size + dembed_add_dim,
+                                  1, 3,
+                                  self.hidden_size)
         self.state = None
 
-        self.ema = EMA(self.decay)  if self.add_mask else None# EMABatchTime(self.decay)
+        self.ema = EMA(self.decay)  # EMABatchTime(self.decay)
         self.device = (torch.device("cuda")
                        if torch.cuda.is_available() else torch.device("cpu"))
+        self.updated_mems = None
+        self.get_initial_state()
+        self.state_temp_dims = [state.size() if state is not None else None for state in self.state]
+        self.state = None
+        #print(f'shapes of states is {self.state_temp_dims}')
+
+    def context_to_feat(self, states_w_context):
+        # add all features to last dim and make the batch major dim
+        states_wo_context = []
+        for state in states_w_context:
+            if len(state.size()) < 4:
+                states_wo_context.append(
+                    state.view(state.size(0), -1) if state is not None else state)
+            else:
+                states_wo_context.append(
+                    state.view(*state.size()[:2], -1).permute(1, 0, 2) if state is not None else state)
+        return states_wo_context
+
+    def feat_to_context(self, states_wo_context):
+
+        states_w_context = []
+        for state, sz in zip(states_wo_context, self.state_temp_dims):
+            #print(f'pair of state {state}, and its size {sz}')
+            # states_w_context.append(state.view(*sz) if state is not None else state)
+            if len(sz) <4:
+                states_w_context.append(state.view(*sz) if state is not None else state)
+
+            else:
+                states_w_context.append(
+                    state.permute(1, 0, 2).view(*sz) if state is not None else state)
+        return states_w_context
 
     def policy(self, obs: TensorType, state: List[TensorType], explore=True
                ) -> Tuple[TensorType, List[float], List[TensorType]]:
-        """Returns the action. Runs through the encoder, recurrent model,
-        and policy to obtain action.
+        """Returns the action. Runs through the encoder, trans, observe step,
+        and policy to obtain action. state should lag the obs by 1 step
         """
+
+        #for i, s in enumerate(state):
+            #print(f'In policy state {i} dim is: {s.size()})')
         if state is None:
-            self.initial_state()
+            # with initial ext_context
+            self.get_initial_state()
         else:
-            self.state = state
+            #for i, s in enumerate(state):
+            #    print(f'In policy state before {i} dim is: {s.size()})')
+            self.state = self.feat_to_context(state)
+            #for i, s in enumerate(self.state):
+            #    print(f'In policy state before {i} dim is: {s.size()})')
 
-        # split states into it's three parts
-        post = self.state[:4]
-        hyper_state = self.state[4:-1]
-        action = self.state[-1]
-
+        # split states into it's four parts
+        last_posts = self.state[:3]
+        last_dstates = self.state[3]
+        last_actions = self.state[5]
+        mems =  self.state[-1]#[-self.num_transformer_units:]
+        # The knowledge of the transformer is distilled online to the
+        # transition HC model to get meaningful transitions
         embed = self.encoder(obs)
-        post, _, hyper_state, _ = self.dynamics.obs_step(post, action, embed, hyper_state)
-        feat = self.dynamics.get_feature(post, hyper_state if self.hyper_in_state else None)
+        out, memory_outs = self.trans(embed[:, None, ...], mems)
+        self.dynamics.cell.reset_cell()
+        last_post, _, last_dstate, d_embed, _, _ = \
+            self.dynamics.obs_step(last_posts, last_actions, last_dstates, out[:, 0])
+
+        self.state = self.update_state(last_post +
+                                       [last_dstate, d_embed, None, memory_outs])
+
+        last_posts = self.state[:3]
+        last_dstates = self.state[3]
+        d_embed = self.state[4]
+
+
+        feat = self.dynamics.get_feature(last_posts[-1][:, -1], last_dstates[:, -1], d_embed[:, -1])
+        #print('features to compute actions: ', feat.max(), feat.min())
 
         action_dist = self.actor(feat)
         if explore:
@@ -796,52 +850,143 @@ class DreamerModel(TorchModelV2, nn.Module):
         else:
             action = action_dist.mean
         logp = action_dist.log_prob(action)
+        self.state = self.update_state(3 * [None] + [None, None, action, None])
+        #print(action)
+        return action, logp, self.context_to_feat(self.state)
 
-        self.state = post + hyper_state + [action]
-        return action, logp, self.state
-
-    def imagine_ahead(self, state: List[TensorType], hyper_state: List[TensorType],
+    def imagine_ahead(self, sstates: List[TensorType], dstates: TensorType, acts: TensorType, d_embeds: TensorType,
                       horizon: int) -> TensorType:
-        """Given a batch of states and hyperstates rolls out more state of length horizon.
+        """Given a batch of statesrolls out more state of length horizon.
+
         """
+        # extract extended context from each argument
+        time_sample = (dstates.size(1) // (self.ext_context + 1)) * (self.ext_context + 1)
         start_prior = []
-        start_hyper = []
-        for s in state:
-            s = s.contiguous().detach()
-            shpe = [-1] + list(s.size())[2:]
+        for s in sstates:
+            s = s[:, :time_sample].contiguous().detach()
+            shpe = [-1] + [self.ext_context + 1] + list(s.size())[2:]
             start_prior.append(s.view(*shpe))
 
-        for s in hyper_state:
-            s = s.contiguous().detach()
-            shpe = [-1] + list(s.size())[2:]
-            start_hyper.append(s.view(*shpe))
+        start_dstates = dstates[:, :time_sample].contiguous().detach()
+        shpe = [-1] + [self.ext_context + 1] + list(start_dstates.size())[2:]
+        start_dstates = start_dstates.view(*shpe)
 
-        def next_state(state, hyper_state):
-            feature = self.dynamics.get_feature(state, hyper_state if self.hyper_in_state else None).detach()
+        start_acts = acts[:, :time_sample].contiguous().detach()
+        shpe = [-1] + [self.ext_context + 1] + list(start_acts.size())[2:]
+        start_acts = start_acts.view(*shpe)
+
+        if self.dembed_in_state:
+            start_d_embeds = d_embeds[:, :time_sample].contiguous().detach()
+            shpe = [-1] + [self.ext_context + 1] + list(start_d_embeds.size())[2:]
+            d_embed = start_d_embeds.view(*shpe)[:, 0, ...]
+        else:
+            d_embed = None
+
+        def next_state(sstate, dstate, d_embed, prev_acts):
+            # All parameters except the d_embed are with the ext_context so it must be cleared from the get_feature
+            feature = self.dynamics.get_feature(sstate[-1][:, -1], dstate[:, -1],
+                                                d_embed).detach()  # added
             action = self.actor(feature).rsample()
-            next_state, hyper_state, _ = self.dynamics.img_step(state, action, hyper_state)
-            return next_state, hyper_state, _
+            prev_acts = torch.cat((prev_acts, action[:, None, ...]), dim=1)
+            prev_acts = prev_acts[:, 1:, ...]
+            self.dynamics.cell.reset_cell()
+            next_sstate, next_dstate, d_embed, _, _ = self.dynamics.img_step(sstate, prev_acts, dstate)
+            d_embed = d_embed if self.dembed_in_state else None
+            return next_sstate, next_dstate, d_embed, prev_acts
 
-        last = start_prior
-        last_hyper = start_hyper
-        outputs = [[] for _ in range(len(start_prior))]
-        hyper_outputs = [[] for _ in range(len(start_hyper))]
+        o_sstates = start_prior
+        o_dstates = start_dstates
+
+        last_priors = start_prior
+        last_dstates = start_dstates
+        last_acts = start_acts
+
+        d_embeds = [] if self.dembed_in_state else None
+
         for _ in range(horizon):
-            last, last_hyper, _ = next_state(last, last_hyper)
-            [o.append(s) for s, o in zip(last, outputs)]
-            [o.append(s) for s, o in zip(last_hyper, hyper_outputs)]
-        outputs = [torch.stack(x, dim=0) for x in outputs]
-        hyper_outputs = [torch.stack(x, dim=0) for x in hyper_outputs]
+            next_sstate, next_dstate, d_embed, last_acts = next_state(last_priors, last_dstates, d_embed, last_acts)
 
-        imag_feat = self.dynamics.get_feature(outputs, hyper_outputs if self.hyper_in_state else None)
+            o_sstates = [torch.cat((s, o[:, None, ...]), dim=1)
+                         for s, o in zip(o_sstates, next_sstate)]
+            o_dstates = torch.cat((o_dstates, next_dstate[:, None, ...]), dim=1)
+
+            # should contain 1+ext context elements
+            last_priors = [s[:, -self.ext_context - 1:, ...] for s in o_sstates]
+            last_dstates = o_dstates[:, -self.ext_context - 1:, ...]
+            if self.dembed_in_state:
+                d_embeds.append(d_embed)
+
+        # in this part the output features should be indexed first with time (T,B, features)
+        # the inits are removed which are the first self.ext_context + 1
+        d_embeds = torch.stack(d_embeds, dim=0) if self.dembed_in_state else None
+        o_sstates = [x[:, self.ext_context + 1:].permute(1, 0, 2) for x in o_sstates]
+        o_dstates = o_dstates[:, self.ext_context + 1:].permute(1, 0, 2)
+        imag_feat = self.dynamics.get_feature(o_sstates[-1], o_dstates, d_embeds)
         return imag_feat
 
-    def get_initial_state(self) -> List[TensorType]:
-        """Initial state consists of the initial state of the RSSM and the hyper network on top of it and action
-                """
-        self.state = self.dynamics.get_initial_state(1) + self.dynamics.get_initial_hyper_state(1) + \
-                     [torch.zeros(1, self.action_space.shape[0]).to(self.device)]
-        return self.state
+    def get_initial_mem(self, batch_size: int = None) -> List[TensorType]:
+
+        if self.memory_tau > 0:
+            batch_size = batch_size if batch_size else 1
+            mems = torch.stack([torch.zeros(batch_size, self.memory_tau, self.atten_size).to(self.device) for _ in
+                                range(self.num_transformer_units)])
+            #mems = [torch.zeros(batch_size, self.memory_tau, self.atten_size).to(self.device) for _ in
+            #        range(self.num_transformer_units)]
+        else:
+            mems = None #[None for _ in
+                    #range(self.num_transformer_units)]
+        return mems
+
+
+    def get_initial_state(self, batch_size: int = None) -> List[TensorType]:
+        """Initial state consists of the initial state of the TSSM with d_embed if active, memory and action
+         The form of the state is (mu_post, sig_post, sample_post, dstate, d_embed, action, memory)
+         all of ext_context+1 in the time axis except for the dembed it is 1 and for the mem it is
+         mem tau
+        """
+        batch_size = batch_size if batch_size else 1
+        self.state = self.dynamics.get_initial_sstates(batch_size) + [self.dynamics.get_initial_dstates(batch_size)] + \
+                     [torch.zeros(batch_size, 1, self.n_z).to(self.device) if self.dembed_in_state else None] + \
+                     [torch.zeros(batch_size, self.ext_context + 1, self.action_space.shape[0]).to(self.device)] + \
+                     [self.get_initial_mem(batch_size)] #remove brackets
+        return self.context_to_feat(self.state)
+
+
+    def update_state(self, single_step_state) -> List[TensorType]:
+        """updates the state with the previous memory tau for the memory and the previous ext context for other
+        state (List[TensorType or List(TensorType)]): list of the new states from obs_step and transformer
+        required to add them to the current state and roll it
+                  """
+        # update memory
+        last_state = []
+        state_no_mem = single_step_state[:-1]
+        mem = single_step_state[-1]
+
+        if mem is None:
+            # if there is no update or memory is not used
+            # then keep last (either the prev_memory or none)
+            last_mems = self.state[-1] #self.state[-self.num_transformer_units:]
+        else:
+            last_mems = []
+            for i, _ in enumerate(mem):
+                state_cat = torch.cat((self.state[-1][i], mem[i]), dim=1)
+                #state_cat = torch.cat((self.state[-self.num_transformer_units + i], mem[i]), dim=1)
+                last_mems.append(state_cat[:, -self.memory_tau:, ...])
+            last_mems = torch.stack(last_mems)
+
+        for i, _ in enumerate(state_no_mem):
+
+            if state_no_mem[i] is None:
+                # None means no change, so if None, keep it.
+                last_state.append(self.state[i])
+                continue
+            if len(self.state[i].size()) > 2:  # contains an extend context
+                state_cat = torch.cat((self.state[i], state_no_mem[i][:, None, ...]), dim=1)
+                last_state.append(state_cat[:, - self.state[i].size()[1]:, ...])
+            else:
+                last_state.append(state_no_mem[i])
+        updated_state = last_state + [last_mems]
+        return updated_state
 
     def value_function(self) -> TensorType:
         return None
