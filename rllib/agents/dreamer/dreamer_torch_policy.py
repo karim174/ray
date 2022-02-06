@@ -59,9 +59,9 @@ def compute_dreamer_loss(obs,
 
     # PlaNET Model Loss
     print('input to compute dreamer loss devices:')
-    print(f'obs: {obs.device}, action {act.device}, reward {reward.device}, init_mems {init_mems.device}')
+    print(f'obs: {obs.device}, action {action.device}, reward {reward.device}, init_mems {init_mems.device}')
     obs = obs.to(model.device)
-    act = act.to(model.device)
+    act = action.to(model.device)
     reward = reward.to(model.device)
     init_mems = init_mems.to(model.device)
     print(f'after converseion obs: {obs.device}, action {act.device}, reward {reward.device}, init_mems {init_mems.device}')
