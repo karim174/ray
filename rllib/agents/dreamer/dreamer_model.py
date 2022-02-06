@@ -732,14 +732,17 @@ class DreamerModel(TorchModelV2, nn.Module):
         self.action_size = action_space.shape[0]
         dembed_add_dim = self.n_z if self.dembed_in_state else 0
 
-        self.encoder = ConvEncoder(self.depth)
+        self.device = (torch.device("cuda")
+                       if torch.cuda.is_available() else torch.device("cpu"))
+
+        self.encoder = ConvEncoder(self.depth).to(self.device)
         self.decoder = ConvDecoder(
             self.stoch_size + self.deter_size + dembed_add_dim,
-            depth=self.depth)
+            depth=self.depth).to(self.device)
         self.reward = DenseDecoder(
             self.stoch_size + self.deter_size + dembed_add_dim,
             1, 2,
-            self.hidden_size)
+            self.hidden_size).to(self.device)
 
         self.dynamics = TSSM(self.action_size,
                              stoch_size=self.stoch_size,
@@ -749,7 +752,7 @@ class DreamerModel(TorchModelV2, nn.Module):
                              ext_context=self.ext_context,
                              add_mask=self.add_mask,
                              w_cng_reg=self.w_cng_reg
-                             )
+                             ).to(self.device)
         self.trans = GTrXLNet(input_dim=32 * self.depth,
                               output_dim=self.deter_size,
                               action_dim=self.action_size,
@@ -757,19 +760,19 @@ class DreamerModel(TorchModelV2, nn.Module):
                               num_transformer_units=self.num_transformer_units,
                               num_heads=self.num_heads,
                               memory_inference=self.memory_tau,
-                              memory_training=self.memory_tau)
+                              memory_training=self.memory_tau).to(self.device)
 
         self.actor = ActionDecoder(self.stoch_size + self.deter_size +
                                    dembed_add_dim,
-                                   self.action_size, 4, self.hidden_size)
+                                   self.action_size, 4, self.hidden_size).to(self.device)
         self.value = DenseDecoder(self.stoch_size + self.deter_size + dembed_add_dim,
                                   1, 3,
-                                  self.hidden_size)
+                                  self.hidden_size).to(self.device)
         self.state = None
 
         self.ema = EMA(self.decay)  # EMABatchTime(self.decay)
-        self.device = (torch.device("cuda")
-                       if torch.cuda.is_available() else torch.device("cpu"))
+
+        print(f'device in model is {self.device}')
         self.updated_mems = None
         self.get_initial_state()
         self.state_temp_dims = [state.size() if state is not None else None for state in self.state]
