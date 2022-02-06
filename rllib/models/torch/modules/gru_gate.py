@@ -12,16 +12,19 @@ class GRUGate(nn.Module):
         init_bias (int): Bias added to every input to stabilize training
         """
         super().__init__(**kwargs)
+        self.device = (torch.device("cuda")
+                       if torch.cuda.is_available() else torch.device("cpu"))
         self._init_bias = init_bias
+        
 
         # Xavier initialization of torch tensors
-        self._w_r = torch.zeros(dim, dim)
-        self._w_z = torch.zeros(dim, dim)
-        self._w_h = torch.zeros(dim, dim)
+        self._w_r = torch.zeros(dim, dim).to(self.device)
+        self._w_z = torch.zeros(dim, dim).to(self.device)
+        self._w_h = torch.zeros(dim, dim).to(self.device)
 
-        self._u_r = torch.zeros(dim, dim)
-        self._u_z = torch.zeros(dim, dim)
-        self._u_h = torch.zeros(dim, dim)
+        self._u_r = torch.zeros(dim, dim).to(self.device)
+        self._u_z = torch.zeros(dim, dim).to(self.device)
+        self._u_h = torch.zeros(dim, dim).to(self.device)
 
         nn.init.xavier_uniform_(self._w_r)
         nn.init.xavier_uniform_(self._w_z)
@@ -31,7 +34,7 @@ class GRUGate(nn.Module):
         nn.init.xavier_uniform_(self._u_z)
         nn.init.xavier_uniform_(self._u_h)
 
-        self._bias_z = torch.zeros(dim, ).fill_(self._init_bias)
+        self._bias_z = torch.zeros(dim, ).fill_(self._init_bias).to(self.device)
 
     def forward(self, inputs, **kwargs):
         # Pass in internal state first.

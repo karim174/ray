@@ -26,8 +26,9 @@ class RelativePositionEmbedding(nn.Module):
     def __init__(self, out_dim, **kwargs):
         super().__init__()
         self.out_dim = out_dim
-
-        out_range = torch.arange(0, self.out_dim, 2.0)
+        self.device = (torch.device("cuda")
+                       if torch.cuda.is_available() else torch.device("cpu"))
+        out_range = torch.arange(0, self.out_dim, 2.0).to(self.device)
         inverse_freq = 1 / (10000**(out_range / self.out_dim))
         self.register_buffer("inverse_freq", inverse_freq)
 
@@ -74,6 +75,8 @@ class RelativeMultiHeadAttention(nn.Module):
         super().__init__(**kwargs)
 
         # No bias or non-linearity.
+        self.device = (torch.device("cuda")
+                       if torch.cuda.is_available() else torch.device("cpu"))
         self._num_heads = num_heads
         self._head_dim = head_dim
 
