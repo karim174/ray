@@ -247,13 +247,13 @@ def total_sampled_timesteps(worker):
 
 class DreamerIteration:
     def __init__(self, worker, episode_buffer, dreamer_train_iters, batch_size,
-                 act_repeat, smoothing = 0.001):
+                 act_repeat, smoothing=0.001):
         self.worker = worker
         self.episode_buffer = episode_buffer
         self.dreamer_train_iters = dreamer_train_iters
         self.repeat = act_repeat
         self.batch_size = batch_size
-        self.smoothing = 0.001
+        self.smoothing = smoothing
 
     def __call__(self, samples):
         #print(samples.keys)
