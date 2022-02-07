@@ -338,7 +338,7 @@ class HyperTranCell(nn.Module):
             nn.Linear(self.hidden_size, self.n_z),
         )
 
-        self.offset_layer = nn.Linear(self.t_p_ext_context * ads_size, 1, bias=False)  #, self.deter_size, bias=False) # bias was True
+        #self.offset_layer = nn.Linear(self.t_p_ext_context * ads_size, self.deter_size, bias=False)  #, self.deter_size, bias=False) # bias was True
         w_m_ads = [torch.zeros(self.deter_size, ads_size, n_z) for _ in
                    range(2 if self.add_mask else 1)]  # self.t_p_ext_context*ads_size
         w_m_ads = tuple([nn.init.xavier_normal_(w) for w in w_m_ads])  # shouldn't be like that orthogonal_ xavier_normal_
@@ -360,7 +360,7 @@ class HyperTranCell(nn.Module):
 
         z_ads = self.z_ads(
             ads_context)  # contains mask, and every feature. just chunk for the masks (last two dimensions)
-        offset = self.offset_layer(ads_context)
+        #offset = self.offset_layer(ads_context)
         all_weights = torch.einsum('ijk,bk->bij', self.w_m_ads[0], z_ads)/np.sqrt(z_ads.size(1))
         # split weights ru for x and h, o for x and h, mask_weight x and h
         if self.add_mask:
@@ -379,7 +379,7 @@ class HyperTranCell(nn.Module):
 
 
         d_next =  torch.einsum('bij,bj->bi',
-                                      curr_w, ads_context_wt[:, -1, :])/np.sqrt(ads_context_wt[:, -1, :].size(1)) + offset
+                                      curr_w, ads_context_wt[:, -1, :])/np.sqrt(ads_context_wt[:, -1, :].size(1)) #+ offset
         mask_o = (m_w_dist, m_w_sample) if self.add_mask else (None, None)
         weight_change = torch.mean(
             torch.norm(self.prev_w - curr_w, dim=(1, 2))) if self.w_cng_reg and self.prev_w is not None else None
