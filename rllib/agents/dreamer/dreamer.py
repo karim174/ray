@@ -129,7 +129,6 @@ class EpisodicBuffer(object):
 
         self.timesteps += batch.count
         episodes = batch.split_by_episode()
-        #print('keys in episode', episodes[0].keys)
         for i, e in enumerate(episodes):
             episodes[i] = self.preprocess_episode(e)
         self.episodes.extend(episodes)

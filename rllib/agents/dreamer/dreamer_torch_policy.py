@@ -96,6 +96,8 @@ def compute_dreamer_loss(obs,
     div = torch.clamp(div, min=free_nats)
     if model.add_mask:
         mask_logp_w, mask_entropy_w = mask
+        norm_mask = pred_dstates.size(-1) * (action.size(-1) + pred_dstates.size(-1) + posts[0].size(-1))
+        mask_logp_w, mask_entropy_w = mask_logp_w / norm_mask, mask_entropy_w / norm_mask
         with torch.no_grad():
             # reinf_reward = (image_pred.log_prob(obs)) + \
             #                    reward_pred.log_prob(reward) # shape should be (batch, time)

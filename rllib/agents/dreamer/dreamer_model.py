@@ -378,9 +378,8 @@ class HyperTranCell(nn.Module):
         # print(torch.einsum('bij,bj->bi',  curr_w, ads_context).size(), d_context[:, -1, :] .size(), offset.size())
 
 
-        d_next =  torch.sigmoid(offset)*torch.einsum('bij,bj->bi',
-                                      curr_w, ads_context_wt[:, -1, :])/np.sqrt(ads_context_wt[:, -1, :].size(1)) \
-                                        + d_context[:, -1, :]
+        d_next =  torch.einsum('bij,bj->bi',
+                                      curr_w, ads_context_wt[:, -1, :])/np.sqrt(ads_context_wt[:, -1, :].size(1)) + offset
         mask_o = (m_w_dist, m_w_sample) if self.add_mask else (None, None)
         weight_change = torch.mean(
             torch.norm(self.prev_w - curr_w, dim=(1, 2))) if self.w_cng_reg and self.prev_w is not None else None
