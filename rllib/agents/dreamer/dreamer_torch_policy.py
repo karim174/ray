@@ -58,19 +58,10 @@ def compute_dreamer_loss(obs,
               if torch.cuda.is_available() else torch.device("cpu"))
 
     # PlaNET Model Loss
-    #print('input to compute dreamer loss devices:')
-    #print(f'obs: {obs.device}, action {act.device}, reward {reward.device}, init_mems {init_mems.device}')
-    #obs = obs.to(model.device)
-    #action = action.to(model.device)
-    #reward = reward.to(model.device)
-    #init_mems = init_mems.to(model.device)
-    #print(f'after converseion obs: {obs.device}, action {action.device}, reward {reward.device}, init_mems {init_mems.device}')
     latent = model.encoder(obs)
     #shape got from buffer for init_mems is (batch, mem_tau, layers, dim)
     out, memory_outs = model.trans(latent, init_mems.permute(2,0,1,3))
 
-    #post, prior, hyper_state, mask = model.dynamics.observe(latent, action)
-    #features = model.dynamics.get_feature(post, hyper_state if model.hyper_in_state else None)
     posts, priors, pred_dstates, d_embeds, mask, weight_changes = model.dynamics.observe(action, out)
     dstates_trans = out[:, -pred_dstates.size()[1]:, ...]
     matching_loss = torch.norm(dstates_trans - pred_dstates, dim=-1).mean() #(1)
@@ -99,8 +90,6 @@ def compute_dreamer_loss(obs,
         norm_mask = pred_dstates.size(-1) * (action.size(-1) + pred_dstates.size(-1) + posts[0].size(-1))
         mask_logp_w, mask_entropy_w = mask_logp_w / norm_mask, mask_entropy_w / norm_mask
         with torch.no_grad():
-            # reinf_reward = (image_pred.log_prob(obs)) + \
-            #                    reward_pred.log_prob(reward) # shape should be (batch, time)
             reinf_reward = -(image_loss + reward_loss)  # weighted by the likelihood
             reinforce_reward = reinf_reward.detach().clone()  # remove the rewards from the graph and clone them
         reinforce_reward_ema = model.ema.update(reinforce_reward)
@@ -210,16 +199,9 @@ def log_summary(obs, action, embed, image_pred, model):
     init, _, init_dstates, _, _, _ = model.dynamics.observe(action[:b_samp, :model.ext_context+5],
                                                             embed[:b_samp, :model.ext_context+5]) #fix
 
-    #print(f'observe before the context extraction post shapes are {init[0].size()}')
-    #print(f'observe before the context extraction dstates shape ise {init_dstates.size()}')
     init = [itm[:, -model.ext_context - 1:] for itm in init]
     init_dstates = init_dstates[:, -model.ext_context - 1:]
-    #print(f'observe after the context extraction post shapes are {init[0].size()}')
-    #print(f'observe after the context extraction dstates shape ise {init_dstates.size()}')
-
     priors, pred_dstates, d_embeds = model.dynamics.imagine(action[:b_samp, 5:], init, init_dstates) # shapes [model.ext_context+5:]
-    #print(f'after imagine prior shapes are {init[0].size()}')
-    #print(f'after imagine dstates shape is {init_dstates.size()}')
     if model.dembed_in_state:
         feats =model.dynamics.get_feature(priors[-1], pred_dstates,
                                    d_embeds if model.dembed_in_state else None)
