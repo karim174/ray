@@ -247,12 +247,13 @@ def total_sampled_timesteps(worker):
 
 class DreamerIteration:
     def __init__(self, worker, episode_buffer, dreamer_train_iters, batch_size,
-                 act_repeat):
+                 act_repeat, smoothing = 0.001):
         self.worker = worker
         self.episode_buffer = episode_buffer
         self.dreamer_train_iters = dreamer_train_iters
         self.repeat = act_repeat
         self.batch_size = batch_size
+        self.smoothing = 0.001
 
     def __call__(self, samples):
         #print(samples.keys)
@@ -266,7 +267,9 @@ class DreamerIteration:
             updated_mems=fetches['default_policy']["updated_mems"][:, -self.episode_buffer.length:, ...]
             if updated_mems is not None:
                 for i, (ep, index) in enumerate(ep_t_ids):
-                    self.episode_buffer.episodes[ep]["mems"][index: index+self.episode_buffer.length] = updated_mems[i]
+                    prev_mems = self.episode_buffer.episodes[ep]["mems"][index: index + self.episode_buffer.length]
+                    self.episode_buffer.episodes[ep]["mems"][index: index+self.episode_buffer.length] = \
+                    self.smoothing*updated_mems[i] + (1-self.smoothing)*prev_mems
         # Custom Logging
         policy_fetches = self.policy_stats(fetches)
         if "log_gif" in policy_fetches:
