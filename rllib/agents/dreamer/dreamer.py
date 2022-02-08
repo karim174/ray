@@ -58,6 +58,8 @@ DEFAULT_CONFIG = with_common_config({
     "matching_coeff": 0.01,
     # Memory updates in the buffer
     "mem_smoothing": 0.01,
+#   Memory updates in the buffer
+    "zero_mems": True,
     # Distributed Dreamer not implemented yet
     "num_workers": 0,
     # Prefill Timesteps
@@ -176,11 +178,12 @@ class EpisodicBuffer(object):
         }
         return SampleBatch(new_batch)
 
-    def sample(self, batch_size: int):
+    def sample(self, batch_size: int, zero_mems: bool):
         """Samples [batch_size, length] from the list of episodes
 
         Args:
             batch_size: batch_size to be sampled
+            zero_mems: whether to sample zero mems or not
         """
         episodes_buffer = []
         ep_t_ids = []
@@ -199,7 +202,7 @@ class EpisodicBuffer(object):
             #for k, v in episode_slice.items():
             #    print(f' for the {k} shape is {v.shape}')
             ep_t_ids.append([rand_index, index])
-            episode_slice=self.add_cntx_tau(rand_index, index, episode_slice)
+            episode_slice=self.add_cntx_tau(rand_index, index, episode_slice, zero_mems)
             #for k, v in episode_slice.items():
             #    print(f' for the {k} shape is {v.shape}')
 
@@ -212,17 +215,26 @@ class EpisodicBuffer(object):
 
         return ep_t_ids, SampleBatch(batch)
 
-    def add_cntx_tau(self, episode_id, index, episode_slice):
+    def add_cntx_tau(self, episode_id, index, episode_slice, zero_mems=True):
         """completes the episode slice with data from buffer or pad to the left.
 
                 Args:
                     episode_id: episode to index from
                     index: the index of the slice in the buffer
                     episode_slice: sample batch to pad or compliment
+                    zero_mems: whether to fill mems with just zeros
                 """
 
         batch = {}
         for k, v in episode_slice.items():
+            if k=='mems' and zero_mems:
+                v_shp = v.shape
+                pad_shp = (self.memory_tau, *v_shp[1:])
+                # print(pad_shp)
+                pad = np.zeros(pad_shp)
+                batch[k] = pad
+                continue
+
             to_add = self.ext_context if k != 'mems' else self.memory_tau
             start_id_buffer = max(index - to_add, 0)
             from_buffer = index - start_id_buffer
@@ -251,20 +263,21 @@ def total_sampled_timesteps(worker):
 
 class DreamerIteration:
     def __init__(self, worker, episode_buffer, dreamer_train_iters, batch_size,
-                 act_repeat, smoothing=0.002):
+                 act_repeat, smoothing=0.002, zero_mems=True):
         self.worker = worker
         self.episode_buffer = episode_buffer
         self.dreamer_train_iters = dreamer_train_iters
         self.repeat = act_repeat
         self.batch_size = batch_size
         self.smoothing = smoothing
+        self.zero_mems = zero_mems
 
     def __call__(self, samples):
         #print(samples.keys)
         # Dreamer Training Loop
         for n in range(self.dreamer_train_iters):
             print(n)
-            ep_t_ids , batch = self.episode_buffer.sample(self.batch_size)
+            ep_t_ids , batch = self.episode_buffer.sample(self.batch_size, self.zero_mems)
             if n == self.dreamer_train_iters - 1:
                 batch["log_gif"] = True
             fetches = self.worker.learn_on_batch(batch)
@@ -321,11 +334,12 @@ def execution_plan(workers, config):
     dreamer_train_iters = config["dreamer_train_iters"]
     act_repeat = config["action_repeat"]
     smoothing = config["mem_smoothing"]
+    zero_mems = config["zero_mems"]
 
     rollouts = ParallelRollouts(workers)
     rollouts = rollouts.for_each(
         DreamerIteration(local_worker, episode_buffer, dreamer_train_iters,
-                         batch_size, act_repeat, smoothing))
+                         batch_size, act_repeat, smoothing, zero_mems))
     return rollouts
 
 

@@ -63,11 +63,12 @@ def compute_dreamer_loss(obs,
     # PlaNET Model Loss
     latent = model.encoder(obs)
     #shape got from buffer for init_mems is (batch, mem_tau, layers, dim)
-    out, memory_outs = model.trans(latent, init_mems.permute(2,0,1,3))
+    out, memory_outs = model.trans(latent, init_mems.permute(2, 0, 1, 3))
 
     posts, priors, pred_dstates, d_embeds, mask, weight_changes = model.dynamics.observe(action, out)
     dstates_trans = out[:, -pred_dstates.size()[1]:, ...]
-    matching_loss = matching_coeff*torch.norm(dstates_trans - pred_dstates, dim=-1).mean() #(1)
+    with FreezeParameters(tran_weights):
+        matching_loss = matching_coeff*torch.norm(dstates_trans - pred_dstates, dim=-1).mean() #(1)
     features = model.dynamics.get_feature(posts[-1], pred_dstates,
                                           d_embeds if model.dembed_in_state else None)  # added features
     features_t = model.dynamics.get_feature(posts[-1], dstates_trans,
@@ -79,8 +80,8 @@ def compute_dreamer_loss(obs,
 
     image_pred_t = model.decoder(features_t)
     reward_pred_t = model.reward(features_t)
-    image_loss_t = -image_pred_t.log_prob(obs[:,model.ext_context:])
-    reward_loss_t = -reward_pred_t.log_prob(reward[:,model.ext_context:])
+    image_loss_t = -image_pred_t.log_prob(obs[:, model.ext_context:])
+    reward_loss_t = -reward_pred_t.log_prob(reward[:, model.ext_context:])
 
     prior_dist = model.dynamics.get_dist(priors[0], priors[1])
     post_dist = model.dynamics.get_dist(posts[0], posts[1])
@@ -105,9 +106,9 @@ def compute_dreamer_loss(obs,
     reward_loss_t = torch.mean(reward_loss_t)
 
     weight_loss = wc_coeff*weight_changes if weight_changes is not None else 0
-    model_loss = kl_coeff * div + reward_loss + image_loss + reward_loss_t + image_loss_t + weight_loss
+    model_loss = kl_coeff * div + reward_loss + image_loss + weight_loss + matching_loss + reward_loss_t + image_loss_t
     if model.add_mask:
-        model_loss = model_loss + ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss + matching_loss \
+        model_loss = model_loss + ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss
 
 
     # [imagine_horizon, batch_length*batch_size, feature_size]
@@ -241,7 +242,7 @@ def dreamer_loss(policy, model, dist_class, train_batch):
 
     loss_dict = policy.stats_dict
 
-    return (loss_dict["model_loss"], loss_dict["actor_loss"],
+    return (loss_dict["model_loss"], loss_dict["model_loss"], loss_dict["actor_loss"],
             loss_dict["critic_loss"])
 
 
@@ -303,8 +304,9 @@ def dreamer_optimizer_fn(policy, config):
     critic_weights = list(model.value.parameters())
     tran_weights = list(model.trans.parameters())
     model_opt = torch.optim.Adam(
-        encoder_weights + decoder_weights + reward_weights + dynamics_weights + tran_weights,
+        encoder_weights + decoder_weights + reward_weights + tran_weights + dynamics_weights,
         lr=config["td_model_lr"])
+    #dyn_opt = torch.optim.Adam(dynamics_weights, lr=0.1*config["td_model_lr"])
     actor_opt = torch.optim.Adam(actor_weights, lr=config["actor_lr"])
     critic_opt = torch.optim.Adam(critic_weights, lr=config["critic_lr"])
 
