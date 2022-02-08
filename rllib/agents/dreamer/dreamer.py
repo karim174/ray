@@ -54,6 +54,10 @@ DEFAULT_CONFIG = with_common_config({
     "ent_coeff": 0.1,
     # Weight change Coeff for the Model Loss
     "wc_coeff": 0.1,
+    # Matching Coeff for the Model Loss
+    "matching_coeff": 0.01,
+    # Memory updates in the buffer
+    "mem_smoothing": 0.01,
     # Distributed Dreamer not implemented yet
     "num_workers": 0,
     # Prefill Timesteps
@@ -316,11 +320,12 @@ def execution_plan(workers, config):
     batch_size = config["batch_size"]
     dreamer_train_iters = config["dreamer_train_iters"]
     act_repeat = config["action_repeat"]
+    smoothing = config["mem_smoothing"]
 
     rollouts = ParallelRollouts(workers)
     rollouts = rollouts.for_each(
         DreamerIteration(local_worker, episode_buffer, dreamer_train_iters,
-                         batch_size, act_repeat))
+                         batch_size, act_repeat, smoothing))
     return rollouts
 
 

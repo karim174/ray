@@ -27,6 +27,7 @@ def compute_dreamer_loss(obs,
                          ent_coeff = 0.1,
                          rei_coeff = 1.0,
                          wc_coeff = 0.01,
+                         matching_coeff = 0.01,
                          free_nats = 3.0,
                          log=False):
     """Constructs loss for the Dreamer objective
@@ -39,9 +40,10 @@ def compute_dreamer_loss(obs,
             discount (float): Discount
             lambda_ (float): Lambda, like in GAE
             kl_coeff (float): KL Coefficient for Divergence loss in model loss
-            ent_coeff(float): Mask Entropy Coefficient for Mask Entropy loss in model loss
-            rei_coeff(float): Reinforce Coefficient for Reinforce loss in model loss
-            wc_coeff(float): Weight change Coefficient for limiting weight change in model loss
+            ent_coeff (float): Mask Entropy Coefficient for Mask Entropy loss in model loss
+            rei_coeff (float): Reinforce Coefficient for Reinforce loss in model loss
+            wc_coeff (float): Weight change Coefficient for limiting weight change in model loss
+            matching_coeff (float): Matching Coefficient for tying transformer and hypertran ouputs
             free_nats (float): Threshold for minimum divergence in model loss
             log (bool): If log, generate gifs
         """
@@ -49,9 +51,10 @@ def compute_dreamer_loss(obs,
     decoder_weights = list(model.decoder.parameters())
     reward_weights = list(model.reward.parameters())
     dynamics_weights = list(model.dynamics.parameters())
+    tran_weights = list(model.trans.parameters())
     critic_weights = list(model.value.parameters())
     model_weights = list(encoder_weights + decoder_weights + reward_weights +
-                         dynamics_weights)
+                         dynamics_weights + tran_weights)
     model.updated_mems = None
     model.dynamics.cell.reset_cell()
     device = (torch.device("cuda")
@@ -64,8 +67,7 @@ def compute_dreamer_loss(obs,
 
     posts, priors, pred_dstates, d_embeds, mask, weight_changes = model.dynamics.observe(action, out)
     dstates_trans = out[:, -pred_dstates.size()[1]:, ...]
-    matching_loss = torch.norm(dstates_trans - pred_dstates, dim=-1).mean() #(1)
-
+    matching_loss = matching_coeff*torch.norm(dstates_trans - pred_dstates, dim=-1).mean() #(1)
     features = model.dynamics.get_feature(posts[-1], pred_dstates,
                                           d_embeds if model.dembed_in_state else None)  # added features
     features_t = model.dynamics.get_feature(posts[-1], dstates_trans,
@@ -232,6 +234,7 @@ def dreamer_loss(policy, model, dist_class, train_batch):
         policy.config["ent_coeff"],
         policy.config["rei_coeff"],
         policy.config["wc_coeff"],
+        policy.config["matching_coeff"],
         policy.config["free_nats"],
         log_gif,
     )
@@ -269,27 +272,16 @@ def action_sampler_fn(policy, model, input_dict, state, explore, timestep):
 
     # Custom Exploration
     if timestep <= policy.config["prefill_timesteps"]:
-        #print(f'input to action sampler devices exploration obs: {obs.device}, states {[s.device for s in state if s is not None]}')
         logp = [0.0]
         # Random action in space [-1.0, 1.0]
         action = 2.0 * torch.rand(1, model.action_space.shape[0]) - 1.0
         state = model.get_initial_state()
-        #print('after get_initial_state devices exploration')
-        #print(f'after get_initial_state devices exploration states {[s.device for s in state if s is not None]}')
     else:
         # Weird RLLib Handling, this happens when env rests
         if len(state[0].size()) == 3:
             # Very hacky, but works on all envs
             state = model.get_initial_state()
-            #print('init state called')
-            #print(f'after get_initial_state devices after exploration obs: {obs.device},  states {[s.device for s in state if s is not None]}')
-        #print(f'time axis dim in state is {model.state_temp_dims}')
-        #state = feat_to_context(state, model.state_temp_dims)
-        #for i, s in enumerate(state):
-        #    print(f'state to context {i} dim is: {s.size()})')
-        #print(f'inp to act sampler generic obs: {obs.device},  states {[s.device for s in state if s is not None]}')
         action, logp, state = model.policy(obs, state, explore)
-        #print(f'output from act sampler generic action: {action.device}, states {[s.device for s in state if s is not None]}')
         action = td.Normal(action, policy.config["explore_noise"]).sample()
         action = torch.clamp(action, min=-1.0, max=1.0)
 
@@ -309,8 +301,9 @@ def dreamer_optimizer_fn(policy, config):
     dynamics_weights = list(model.dynamics.parameters())
     actor_weights = list(model.actor.parameters())
     critic_weights = list(model.value.parameters())
+    tran_weights = list(model.trans.parameters())
     model_opt = torch.optim.Adam(
-        encoder_weights + decoder_weights + reward_weights + dynamics_weights,
+        encoder_weights + decoder_weights + reward_weights + dynamics_weights + tran_weights,
         lr=config["td_model_lr"])
     actor_opt = torch.optim.Adam(actor_weights, lr=config["actor_lr"])
     critic_opt = torch.optim.Adam(critic_weights, lr=config["critic_lr"])
