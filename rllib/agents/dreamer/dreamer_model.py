@@ -843,21 +843,16 @@ class DreamerModel(TorchModelV2, nn.Module):
 
         """
         # extract extended context from each argument
-        #time_sample = (dstates.size(1) // (self.ext_context + 1)) * (self.ext_context + 1)
         ext_p1 = self.ext_context + 1
         T = dstates.size(1) + self.ext_context
         start_prior = []
-        #added_ext_context=torch.stack([dstates[:,i:dstates.size(1)-n+i+1] for i in range(n)], axis =2).view(*shpe)
-        #print('ext_context added in imagine ahead size:', dstates.size(), added_ext_context.size(), added_ext_context.view(shpe).size())
         for s in sstates:
-            #s = s[:, :time_sample].contiguous().detach()
             shpe = [-1] + [self.ext_context + 1] + list(s.size())[2:]
             s = s.contiguous().detach()
             s = pad(s, (0, 0, self.ext_context, 0))
             start_prior.append(torch.stack([s[:, i: T - ext_p1 + i + 1] for i in range(ext_p1)]
                                            , axis=2).view(*shpe))
 
-        #start_dstates = dstates[:, :time_sample].contiguous().detach()
         shpe = [-1] + [self.ext_context + 1] + list(dstates.size())[2:]
         start_dstates = dstates.contiguous().detach()
         start_dstates = pad(start_dstates, (0, 0, self.ext_context, 0))
