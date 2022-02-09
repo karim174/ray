@@ -3,9 +3,6 @@ from typing import Any, List, Tuple, Optional, Union
 from ray.rllib.models.torch.torch_modelv2 import TorchModelV2
 from ray.rllib.utils.framework import try_import_torch
 from ray.rllib.utils.framework import TensorType
-# from ray.rllib.models.torch.misc import SlimFC
-# from ray.rllib.models.torch.modules import GRUGate, SkipConnection
-# from ray.rllib.agents.dreamer.attention_modules import RelativeMultiHeadAttention
 from ray.rllib.agents.dreamer.attention_modules import GTrXLNet
 from ray.rllib.models.torch.recurrent_net import RecurrentNetwork
 from ray.rllib.utils.annotations import override
@@ -14,6 +11,7 @@ from ray.rllib.utils.annotations import override
 torch, nn = try_import_torch()
 if torch:
     from torch import distributions as td
+    from torch.nn.functional import pad
     from ray.rllib.agents.dreamer.utils import Linear, Conv2d, \
         ConvTranspose2d, TanhBijector
 ActFunc = Any
@@ -49,9 +47,6 @@ class EMA:  # BatchTime:
         new_value_c = new_value.detach().clone()
 
         with torch.no_grad():
-            # if len(new_value.size()) > 1:
-            #    new_value_c=new_value_c.mean(tuple(range(2, len(new_value.size()))))
-            # print(new_value_c)
             new_value_c = new_value_c.mean()
             if torch.isnan(self.b_k):
                 self.b_k = new_value_c
@@ -350,8 +345,6 @@ class HyperTranCell(nn.Module):
                 a: torch.Tensor,
                 d: torch.Tensor,
                 ):
-        # print('debugging in hypercell x and h shapes are ', x.shape, h.shape)
-        # TODO(karim): fix this
         a_context = a  # [:, -self.time_context:]
         d_context = d  # [:, -self.time_context:]
         s_context = s  # [:, -self.time_context:]
@@ -487,7 +480,6 @@ class TSSM(nn.Module):
                            self.deter_size).to(self.device)
 
     def observe(self,
-                # embeds: TensorType,
                 actions: TensorType,
                 dstates: TensorType,
                 sstates: List[TensorType] = None,
@@ -531,7 +523,6 @@ class TSSM(nn.Module):
         next_dstates = dstates[:, self.ext_context:]
         # to train good HC bias
         init_dstate = torch.zeros(act_size[0], 1, self.deter_size).to(self.device)
-        #print(f'init_dstate {init_dstate.size()} and dstates size is {dstates.size()}')
         prev_dstates = torch.cat((init_dstate, dstates), dim=1)[:, :-1, ...]
 
         for index in range(act_size[1] - self.ext_context):
@@ -771,12 +762,10 @@ class DreamerModel(TorchModelV2, nn.Module):
 
         self.ema = EMA(self.decay)  # EMABatchTime(self.decay)
 
-        print(f'device in model is {self.device}')
         self.updated_mems = None
         self.get_initial_state()
         self.state_temp_dims = [state.size() if state is not None else None for state in self.state]
         self.state = None
-        #print(f'shapes of states is {self.state_temp_dims}')
 
     def context_to_feat(self, states_w_context):
         # add all features to last dim and make the batch major dim
@@ -794,7 +783,6 @@ class DreamerModel(TorchModelV2, nn.Module):
 
         states_w_context = []
         for state, sz in zip(states_wo_context, self.state_temp_dims):
-            #print(f'pair of state {state}, and its size {sz}')
             # states_w_context.append(state.view(*sz) if state is not None else state)
             if len(sz) <4:
                 states_w_context.append(state.view(*sz) if state is not None else state)
@@ -810,17 +798,11 @@ class DreamerModel(TorchModelV2, nn.Module):
         and policy to obtain action. state should lag the obs by 1 step
         """
 
-        #for i, s in enumerate(state):
-            #print(f'In policy state {i} dim is: {s.size()})')
         if state is None:
             # with initial ext_context
             self.get_initial_state()
         else:
-            #for i, s in enumerate(state):
-            #    print(f'In policy state before {i} dim is: {s.size()})')
             self.state = self.feat_to_context(state)
-            #for i, s in enumerate(self.state):
-            #    print(f'In policy state before {i} dim is: {s.size()})')
 
         # split states into it's four parts
         last_posts = self.state[:3]
@@ -853,7 +835,6 @@ class DreamerModel(TorchModelV2, nn.Module):
             action = action_dist.mean
         logp = action_dist.log_prob(action)
         self.state = self.update_state(3 * [None] + [None, None, action, None])
-        #print(action)
         return action, logp, self.context_to_feat(self.state)
 
     def imagine_ahead(self, sstates: List[TensorType], dstates: TensorType, acts: TensorType, d_embeds: TensorType,
@@ -862,25 +843,40 @@ class DreamerModel(TorchModelV2, nn.Module):
 
         """
         # extract extended context from each argument
-        time_sample = (dstates.size(1) // (self.ext_context + 1)) * (self.ext_context + 1)
+        #time_sample = (dstates.size(1) // (self.ext_context + 1)) * (self.ext_context + 1)
+        ext_p1 = self.ext_context + 1
+        T = dstates.size(1) + self.ext_context
         start_prior = []
+        #added_ext_context=torch.stack([dstates[:,i:dstates.size(1)-n+i+1] for i in range(n)], axis =2).view(*shpe)
+        #print('ext_context added in imagine ahead size:', dstates.size(), added_ext_context.size(), added_ext_context.view(shpe).size())
         for s in sstates:
-            s = s[:, :time_sample].contiguous().detach()
+            #s = s[:, :time_sample].contiguous().detach()
             shpe = [-1] + [self.ext_context + 1] + list(s.size())[2:]
-            start_prior.append(s.view(*shpe))
+            s = s.contiguous().detach()
+            s = pad(s, (0, 0, self.ext_context, 0))
+            start_prior.append(torch.stack([s[:, i: T - ext_p1 + i + 1] for i in range(ext_p1)]
+                                           , axis=2).view(*shpe))
 
-        start_dstates = dstates[:, :time_sample].contiguous().detach()
-        shpe = [-1] + [self.ext_context + 1] + list(start_dstates.size())[2:]
-        start_dstates = start_dstates.view(*shpe)
+        #start_dstates = dstates[:, :time_sample].contiguous().detach()
+        shpe = [-1] + [self.ext_context + 1] + list(dstates.size())[2:]
+        start_dstates = dstates.contiguous().detach()
+        start_dstates = pad(start_dstates, (0, 0, self.ext_context, 0))
 
-        start_acts = acts[:, :time_sample].contiguous().detach()
-        shpe = [-1] + [self.ext_context + 1] + list(start_acts.size())[2:]
-        start_acts = start_acts.view(*shpe)
+        start_dstates = torch.stack([start_dstates[:, i:T - ext_p1 + i + 1] for i in range(ext_p1)]
+                                           , axis=2).view(*shpe)
+
+        shpe = [-1] + [self.ext_context + 1] + list(acts.size())[2:]
+        start_acts = acts.contiguous().detach() #[:, :time_sample]
+        start_acts = pad(start_acts, (0, 0, self.ext_context, 0))
+        start_acts = torch.stack([start_acts[:, i:T - ext_p1 + i + 1] for i in range(ext_p1)]
+                                           , axis=2).view(*shpe)
 
         if self.dembed_in_state:
-            start_d_embeds = d_embeds[:, :time_sample].contiguous().detach()
-            shpe = [-1] + [self.ext_context + 1] + list(start_d_embeds.size())[2:]
-            d_embed = start_d_embeds.view(*shpe)[:, 0, ...]
+            shpe = [-1] + [self.ext_context + 1] + list(d_embeds.size())[2:]
+            start_d_embeds = d_embeds.contiguous().detach()  # [:, :time_sample]
+            start_d_embeds = pad(start_d_embeds, (0, 0, self.ext_context, 0))
+            d_embed = torch.stack([start_d_embeds[:, i:T - ext_p1 + i + 1] for i in range(ext_p1)]
+                                           , axis=2).view(*shpe)[:,-1, ...]
         else:
             d_embed = None
 
@@ -906,8 +902,8 @@ class DreamerModel(TorchModelV2, nn.Module):
         d_embeds = [] if self.dembed_in_state else None
 
         for _ in range(horizon):
-            next_sstate, next_dstate, d_embed, last_acts = next_state(last_priors, last_dstates, d_embed, last_acts)
 
+            next_sstate, next_dstate, d_embed, last_acts = next_state(last_priors, last_dstates, d_embed, last_acts)
             o_sstates = [torch.cat((s, o[:, None, ...]), dim=1)
                          for s, o in zip(o_sstates, next_sstate)]
             o_dstates = torch.cat((o_dstates, next_dstate[:, None, ...]), dim=1)
@@ -932,11 +928,8 @@ class DreamerModel(TorchModelV2, nn.Module):
             batch_size = batch_size if batch_size else 1
             mems = torch.stack([torch.zeros(batch_size, self.memory_tau, self.atten_size).to(self.device) for _ in
                                 range(self.num_transformer_units)])
-            #mems = [torch.zeros(batch_size, self.memory_tau, self.atten_size).to(self.device) for _ in
-            #        range(self.num_transformer_units)]
         else:
-            mems = None #[None for _ in
-                    #range(self.num_transformer_units)]
+            mems = None
         return mems
 
 
@@ -967,12 +960,11 @@ class DreamerModel(TorchModelV2, nn.Module):
         if mem is None:
             # if there is no update or memory is not used
             # then keep last (either the prev_memory or none)
-            last_mems = self.state[-1] #self.state[-self.num_transformer_units:]
+            last_mems = self.state[-1]
         else:
             last_mems = []
             for i, _ in enumerate(mem):
                 state_cat = torch.cat((self.state[-1][i], mem[i]), dim=1)
-                #state_cat = torch.cat((self.state[-self.num_transformer_units + i], mem[i]), dim=1)
                 last_mems.append(state_cat[:, -self.memory_tau:, ...])
             last_mems = torch.stack(last_mems)
 

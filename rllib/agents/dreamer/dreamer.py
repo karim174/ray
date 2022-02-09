@@ -58,7 +58,7 @@ DEFAULT_CONFIG = with_common_config({
     "matching_coeff": 0.01,
     # Memory updates in the buffer
     "mem_smoothing": 0.01,
-#   Memory updates in the buffer
+    # Memory updates in the buffer
     "zero_mems": True,
     # Distributed Dreamer not implemented yet
     "num_workers": 0,
@@ -230,7 +230,6 @@ class EpisodicBuffer(object):
             if k=='mems' and zero_mems:
                 v_shp = v.shape
                 pad_shp = (self.memory_tau, *v_shp[1:])
-                # print(pad_shp)
                 pad = np.zeros(pad_shp)
                 batch[k] = pad
                 continue
@@ -240,8 +239,6 @@ class EpisodicBuffer(object):
             from_buffer = index - start_id_buffer
             zero_pad = to_add - from_buffer
             init_time = v.shape[0]
-            #print(f'for the {k} in episode {episode_id}: get from {start_id_buffer} till {index} in buffer for {from_buffer} elements and '
-            #      f'add {zero_pad} to cover for missing items in {to_add}')
             if k != 'mems':
                 batch[k] = v
             if from_buffer:
@@ -251,7 +248,6 @@ class EpisodicBuffer(object):
             if zero_pad:
                 v_shp = v.shape
                 pad_shp = (zero_pad, *v_shp[1:]) if len(v_shp)>1 else (zero_pad, )
-                #print(pad_shp)
                 pad  = np.zeros(pad_shp)
                 batch[k] = np.concatenate([pad,
                                           batch[k]], axis = 0) if k in batch else pad
@@ -273,7 +269,6 @@ class DreamerIteration:
         self.zero_mems = zero_mems
 
     def __call__(self, samples):
-        #print(samples.keys)
         # Dreamer Training Loop
         for n in range(self.dreamer_train_iters):
             print(n)

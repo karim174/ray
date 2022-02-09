@@ -59,7 +59,6 @@ def compute_dreamer_loss(obs,
     model.dynamics.cell.reset_cell()
     device = (torch.device("cuda")
               if torch.cuda.is_available() else torch.device("cpu"))
-
     # PlaNET Model Loss
     latent = model.encoder(obs)
     #shape got from buffer for init_mems is (batch, mem_tau, layers, dim)
@@ -67,8 +66,10 @@ def compute_dreamer_loss(obs,
 
     posts, priors, pred_dstates, d_embeds, mask, weight_changes = model.dynamics.observe(action, out)
     dstates_trans = out[:, -pred_dstates.size()[1]:, ...]
+
     with FreezeParameters(tran_weights):
         matching_loss = matching_coeff*torch.norm(dstates_trans - pred_dstates, dim=-1).mean() #(1)
+
     features = model.dynamics.get_feature(posts[-1], pred_dstates,
                                           d_embeds if model.dembed_in_state else None)  # added features
     features_t = model.dynamics.get_feature(posts[-1], dstates_trans,
@@ -116,7 +117,7 @@ def compute_dreamer_loss(obs,
         actor_sstates = [v.detach() for v in posts]
         actor_d_embeds = d_embeds.detach()
         actor_pred_dstates = pred_dstates.detach()
-        actor_acts = action.detach()
+        actor_acts = action[:, -pred_dstates.size()[1]:].detach()
 
     with FreezeParameters(model_weights):
         imag_feat = model.imagine_ahead(actor_sstates, actor_pred_dstates,
@@ -147,7 +148,6 @@ def compute_dreamer_loss(obs,
     post_ent = torch.mean(post_dist.entropy())
 
     log_gif = None
-    #print(f'out shape of the transformer {out.size()}')
     if log:
         log_gif = log_summary(obs, action, out, image_pred, model)
 
@@ -195,7 +195,6 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_):
 
 # Creates gif
 def log_summary(obs, action, embed, image_pred, model):
-    #print(f'log summary sizes obs is {obs.size()} action is {action.size()} image_pred is {image_pred.mean.size()}')
     b_samp = min(6, obs.size(0))
     truth = obs[:b_samp, -image_pred.mean.size()[1]:] + 0.5
     recon = image_pred.mean[:b_samp]
@@ -242,7 +241,7 @@ def dreamer_loss(policy, model, dist_class, train_batch):
 
     loss_dict = policy.stats_dict
 
-    return (loss_dict["model_loss"], loss_dict["model_loss"], loss_dict["actor_loss"],
+    return (loss_dict["model_loss"], loss_dict["actor_loss"],
             loss_dict["critic_loss"])
 
 
