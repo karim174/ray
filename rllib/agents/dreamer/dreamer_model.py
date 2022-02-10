@@ -9,6 +9,7 @@ if torch:
     from torch import distributions as td
     from ray.rllib.agents.dreamer.utils import Linear, Conv2d, \
         ConvTranspose2d, GRUCell, TanhBijector, LSTMCell
+    from torch.nn import LSTMCell, GRUCell
 
 ActFunc = Any
 
@@ -296,73 +297,34 @@ class HyperGRUCell(nn.Module):
                  hidden_size: int = 75,
                  hyper_size: int = 15,
                  n_z: int = 12,
-                 simple_rnn: bool = False,
-                 add_mask: bool = False):
+                 add_mask: bool = True,
+                 w_cng_reg: bool = True):
         """
         Args:
-        input_size (int): Hidden size or $f_theta(s_{t-1}, a_{t-a})$
+        input_size (int): Hidden size or $f_theta(s_{t-1}, a_{t-1})$
         hidden_size (int): deter size of the base GRU
         hyper_size (int): size of the smaller LSTM that alters the weights of the larger outer GRU.
         n_z int(int): size of the feature vectors used to alter the GRU weights.
         """
 
         super().__init__()
+        self.add_mask = add_mask
+        self.w_cng_reg = w_cng_reg
 
         self.hyper = LSTMCell(hidden_size + input_size, hyper_size)
-        self.simple_rnn = simple_rnn
-        self.add_mask = add_mask
+        self.input_size = input_size
+        self.hidden_size = hidden_size
 
-        if simple_rnn:
-            # I feel that it's a typo.
-            self.z_h = nn.Linear(hyper_size, n_z)
-            self.z_x = nn.Linear(hyper_size, n_z)
-
-            if self.add_mask:
-                self.m_h = nn.Linear(hyper_size, n_z)
-                self.m_x = nn.Linear(hyper_size, n_z)
-
-            self.z_b = nn.Linear(hyper_size, n_z, bias=False)
-            self.d_b = nn.Linear(n_z, hidden_size)
-
-            # Single parameters are listed (in a ParameterList) to be registered in the model parameters
-            self.w_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
-            self.w_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
-
-            if self.add_mask:
-                self.w_m_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))])
-                self.w_m_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z))])
-
-        else:
-            self.z_h = nn.Linear(hyper_size, 3 * n_z)
-            self.z_x = nn.Linear(hyper_size, 3 * n_z)
-
-            self.z_b = nn.Linear(hyper_size, 3 * n_z, bias=False)
-            d_b = [nn.Linear(n_z, hidden_size) for _ in range(3)]
-            self.d_b = nn.ModuleList(d_b)
-
-            self.w_h = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z)) for _ in range(3)])
-            self.w_x = nn.ParameterList([nn.Parameter(torch.zeros(hidden_size, input_size, n_z)) for _ in range(3)])
-
-            self.m_h = nn.Linear(hyper_size, n_z) if self.add_mask else None
-            self.m_x = nn.Linear(hyper_size, n_z) if self.add_mask else None
-            self.w_m_h = nn.ParameterList(
-                [nn.Parameter(torch.zeros(hidden_size, hidden_size, n_z))]) if self.add_mask else None
-            self.w_m_x = nn.ParameterList(
-                [nn.Parameter(torch.zeros(hidden_size, input_size, n_z))]) if self.add_mask else None
-
-        for param in self.w_h:
-            nn.init.orthogonal_(param)
-        for param in self.w_x:
-            nn.init.orthogonal_(param)
-
-        if add_mask:
-            for param in self.w_m_h:
-                nn.init.orthogonal(param)
-            for param in self.w_m_x:
-                nn.init.orthogonal(param)
-        # Layer normalization
-        # self.layer_norm = nn.ModuleList([nn.LayerNorm(hidden_size) for _ in range(3)])
-        # self.layer_norm_c = nn.LayerNorm(hidden_size)
+        # combined z_hx
+        # self.zm_hx = nn.Linear(hyper_size, 8 * n_z if add_mask else 6*n_z) #Wi,Wf,Wo for x and same for h and extra two for masking
+        # self.d_b = nn.Linear(hyper_size, 3*hidden_size, bias=False)
+        self.zm_hx = nn.Linear(hyper_size, n_z)  # Wi,Wf,Wo for x and same for h and extra two for masking
+        self.d_b = nn.Linear(hyper_size, 3 * hidden_size, bias=False)
+        w_m_hx = [torch.zeros(hidden_size, hidden_size + input_size, n_z) for _ in
+                  range(4 if self.add_mask else 3)]  # 8 * n_z if add_mask else 6*n_z
+        w_m_hx = tuple([nn.init.orthogonal_(w) for w in w_m_hx])  # shouldn't be like that
+        self.w_m_hx = nn.ParameterList([nn.Parameter(torch.cat(w_m_hx))])
+        self.prev_w = None
 
     def forward(self,
                 x: torch.Tensor,
@@ -372,92 +334,47 @@ class HyperGRUCell(nn.Module):
         # print('debugging in hypercell x and h shapes are ', x.shape, h.shape)
         x_hat = torch.cat((h, x), dim=-1)
         h_hat, c_hat = self.hyper(x_hat, [h_hat, c_hat])
+        zm_hx = self.zm_hx(h_hat)  # contains mask, and every feature. just chunk for the masks (last two dimensions)
+        d_b = self.d_b(h_hat)
+        bias_ru, bias_o = torch.split(d_b, (2 * self.hidden_size, self.hidden_size), dim=1)
+        all_weights = torch.einsum('ijk,bk->bij', self.w_m_hx[0], zm_hx)
+        # split weights ru for x and h, o for x and h, mask_weight x and h
+        if self.add_mask:
+            ru_weights, o_weights, m_weights = torch.split(all_weights,
+                                                           (2 * self.hidden_size, self.hidden_size, self.hidden_size),
+                                                           dim=1)
+            m_w = torch.sigmoid(m_weights)
+            m_w = torch.sigmoid(m_w)
+            m_w_dist = td.Bernoulli(m_w)
+            m_w_dist = td.Independent(m_w_dist, 2)
+            m_w_sample = m_w_dist.sample()
+        else:
+            ru_weights, o_weights = torch.split(all_weights, (2 * self.hidden_size, self.hidden_size), dim=1)
 
-        if self.simple_rnn:
-
-            z_h = self.z_h(h_hat)
-            z_x = self.z_x(h_hat)
-            z_b = self.z_b(h_hat)
-            if self.add_mask:
-                m_h = self.m_h(h_hat)
-                m_x = self.m_x(h_hat)
-                m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
-                m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
-                m_h = torch.sigmoid(m_h)
-                m_x = torch.sigmoid(m_x)
-                m_h_dist = td.Bernoulli(m_h)
-                m_h_dist = td.Independent(m_h_dist, 2)
-                m_x_dist = td.Bernoulli(m_x)
-                m_x_dist = td.Independent(m_x_dist, 2)
-                m_h_sample = m_h_dist.sample()
-                m_x_sample = m_x_dist.sample()
-                h_next = torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
-                         torch.einsum('bij,bj->bi', m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
-                         self.d_b(z_b)
-            else:
-                m_h_dist = None
-                m_x_dist = None
-                m_h_sample = None
-                m_x_sample = None
-                h_next = torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[0], z_h), h) + \
-                         torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[0], z_x), x) + \
-                         self.d_b(z_b)
-
-            return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
-
-        z_h = self.z_h(h_hat).chunk(3, dim=-1)
-        z_x = self.z_x(h_hat).chunk(3, dim=-1)
-        z_b = self.z_b(h_hat).chunk(3, dim=-1)
+        ru = torch.einsum('bij,bj->bi', ru_weights, torch.cat((h, x), dim=-1)) + bias_ru
+        ru_sig = torch.sigmoid(ru)
+        r, u = ru_sig.chunk(2, dim=-1)
+        wo_h, wo_x = torch.split(o_weights, (self.hidden_size, self.input_size), dim=-1)
+        curr_w = o_weights * m_w_sample if self.add_mask else all_weights
 
         if self.add_mask:
-            m_h = self.m_h(h_hat)
-            m_x = self.m_x(h_hat)
+            mo_h, mo_x = torch.split(m_w_sample, (self.hidden_size, self.input_size), dim=-1)
+            o = torch.tanh(torch.einsum('bij,bj->bi', mo_h * wo_h, r * h) + \
+                           torch.einsum('bij,bj->bi', mo_x * wo_x, x) + bias_o)
+        else:
+            o = torch.tanh(torch.einsum('bij,bj->bi', wo_h, r * h) + \
+                           torch.einsum('bij,bj->bi', wo_x, x) + bias_o)
 
-        # We calculate $r$, $u$, and $o$ in a loop
-        ruo = []
-        for i in range(3):
-
-            if i != 2:
-                y = torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), h) + \
-                    torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                    self.d_b[i](z_b[i])
-                # ruo.append(torch.sigmoid(self.layer_norm[i](y)))
-                ruo.append(torch.sigmoid(y))
-            else:
-                if self.add_mask:
-                    m_h = torch.einsum('ijk,bk->bij', self.w_m_h[0], m_h)
-                    m_x = torch.einsum('ijk,bk->bij', self.w_m_x[0], m_x)
-                    m_h = torch.sigmoid(m_h)
-                    m_x = torch.sigmoid(m_x)
-                    m_h_dist = td.Bernoulli(m_h)
-                    m_h_dist = td.Independent(m_h_dist, 2)
-                    m_x_dist = td.Bernoulli(m_x)
-                    m_x_dist = td.Independent(m_x_dist, 2)
-                    m_h_sample = m_h_dist.sample()
-                    m_x_sample = m_x_dist.sample()
-                    y = torch.tanh(
-                        torch.einsum('bij,bj->bi', m_h_sample * torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]),
-                                     ruo[0] * h) + \
-                        torch.einsum('bij,bj->bi', m_x_sample * torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                        self.d_b[i](z_b[i]))
-                else:
-
-                    m_h_dist = None
-                    m_x_dist = None
-                    m_h_sample = None
-                    m_x_sample = None
-                    y = torch.tanh(
-                        torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_h[i], z_h[i]), ruo[0] * h) + \
-                        torch.einsum('bij,bj->bi', torch.einsum('ijk,bk->bij', self.w_x[i], z_x[i]), x) + \
-                        self.d_b[i](z_b[i]))
-
-                ruo.append(torch.tanh(y))
-
-        r, u, o = ruo
         h_next = (1 - u) * h + u * o
+        mask_o = (m_w_dist, m_w_sample) if self.add_mask else (None, None)
+        weight_change = torch.mean(
+            torch.norm(self.prev_w - curr_w, dim=(1, 2))) if self.w_cng_reg and self.prev_w is not None else None
+        self.prev_w = curr_w
+        output = h_next, h_hat, c_hat, *mask_o, weight_change
+        return output
 
-        return h_next, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample
-
+    def reset_cell(self):
+        self.prev_w = None
 
 # Represents TD model in PlaNET
 class RSSM(nn.Module):
@@ -477,8 +394,8 @@ class RSSM(nn.Module):
                  hidden: int = 200,
                  hyper_size: int = 15,
                  n_z: int = 12,
-                 simple_rnn: bool = False,
                  add_mask: bool = False,
+                 w_cng_reg: bool = True,
                  act: ActFunc = None):
         """Initializes RSSM
         Args:
@@ -498,7 +415,7 @@ class RSSM(nn.Module):
         self.act = act
         self.n_z = n_z
         self.hyper_size = hyper_size
-        self.simple_rnn = simple_rnn
+        self.w_cng_reg = w_cng_reg
         self.add_mask = add_mask
         if act is None:
             self.act = nn.ELU
@@ -506,7 +423,7 @@ class RSSM(nn.Module):
         self.obs1 = Linear(embed_size + deter, hidden)
         self.obs2 = Linear(hidden, 2 * stoch)
         self.cell = HyperGRUCell(input_size=self.hidden_size, hidden_size=self.deter_size,
-                                 hyper_size=self.hyper_size, n_z=self.n_z, simple_rnn=self.simple_rnn,
+                                 hyper_size=self.hyper_size, n_z=self.n_z, w_cng_reg=self.w_cng_reg,
                                  add_mask=add_mask)
         self.img1 = Linear(stoch + action_size, hidden)
         self.img2 = Linear(deter, hidden)
@@ -564,6 +481,7 @@ class RSSM(nn.Module):
         Returns:
             Posterior states, prior states, hyper states, and masks (all List[TensorType])
         """
+        self.cell.reset_cell()
         if state is None:
             state = self.get_initial_state(action.size()[0])
 
@@ -575,20 +493,27 @@ class RSSM(nn.Module):
 
         priors = [[] for _ in range(len(state))]
         posts = [[] for _ in range(len(state))]
-        # [logp_x, entropy_x, logp_h, entropy_h]
         hyper_states = [[] for _ in range(len(hyper_state))]
+
+        weight_changes = [] if self.w_cng_reg else None
+
         if self.add_mask:
-            masks = [[] for _ in range(4)]  # [logp_x, entropy_x, sample_x, logp_h, entropy_h, sample_h]
+            masks = [[] for _ in range(2)]  # [logp_x, entropy_x, sample_x, logp_h, entropy_h, sample_h]
         last = (state, state)
         for index in range(len(action)):
             # Tuple of post and prior
-            post, prior, hyper_state, mask = self.obs_step(last[0], action[index], embed[index], hyper_state)
+            #post, prior, hyper_state, mask = self.obs_step(last[0], action[index], embed[index], hyper_state)
+            post, prior, hyper_state, mask, weight_change = self.obs_step(last[0],
+                                                                          action[index], embed[index], hyper_state)
             last = [post, prior]
             [o.append(s) for s, o in zip(last[0], posts)]
             [o.append(s) for s, o in zip(last[1], priors)]
             [o.append(s) for s, o in zip(hyper_state, hyper_states)]
+
             if self.add_mask:
                 [o.append(s) for s, o in zip(mask, masks)]
+            if self.w_cng_reg:
+                weight_changes.append(weight_change)
 
         prior = [torch.stack(x, dim=0) for x in priors]
         post = [torch.stack(x, dim=0) for x in posts]
@@ -604,7 +529,11 @@ class RSSM(nn.Module):
         else:
             mask = [None for _ in range(4)]
 
-        return post, prior, hyper_state, mask
+        if self.w_cng_reg:
+            weight_changes = torch.stack(weight_changes[1:], dim=0)
+            weight_changes = torch.mean(weight_changes)
+
+        return post, prior, hyper_state, mask, weight_changes
 
     def imagine(self, action: TensorType,
                 state: List[TensorType] = None,
@@ -618,6 +547,7 @@ class RSSM(nn.Module):
         Returns:
             Prior states, hyper_states masks
         """
+        self.cell.reset_cell()
         if state is None:
             state = self.get_initial_state(action.size()[0])
 
@@ -633,7 +563,7 @@ class RSSM(nn.Module):
         last_prior = state
         last_hyper = hyper_state
         for index in indices:
-            last_prior, last_hyper, mask = self.img_step(last_prior, action[index], last_hyper)
+            last_prior, last_hyper, mask, _ = self.img_step(last_prior, action[index], last_hyper)
             [o.append(s) for s, o in zip(last_prior, priors)]
             [o.append(s) for s, o in zip(last_hyper, hyper_states)]
 
@@ -659,7 +589,7 @@ class RSSM(nn.Module):
         Returns:
             Post, Prior, Hyper state, Mask
       """
-        prior, hyper_state, mask = self.img_step(prev_state, prev_action, hyper_state)
+        prior, hyper_state, mask, weight_change = self.img_step(prev_state, prev_action, hyper_state)
         x = torch.cat([prior[3], embed], dim=-1)
         x = self.obs1(x)
         x = self.act()(x)
@@ -668,7 +598,7 @@ class RSSM(nn.Module):
         std = self.softplus()(std) + 0.1
         stoch = self.get_dist(mean, std).rsample()
         post = [mean, std, stoch, prior[3]]
-        return post, prior, hyper_state, mask
+        return post, prior, hyper_state, mask, weight_change
 
     def img_step(self, prev_state: List[TensorType],
                  prev_action: TensorType,
@@ -685,7 +615,7 @@ class RSSM(nn.Module):
         x = torch.cat([prev_state[2], prev_action], dim=-1)
         x = self.img1(x)
         x = self.act()(x)
-        deter, h_hat, c_hat, m_h_dist, m_h_sample, m_x_dist, m_x_sample = \
+        deter, h_hat, c_hat, m_w_dist, m_w_sample, weight_change = \
             self.cell(x, prev_state[3], *hyper_state)  # x, h, h_hat, c_hat
         x = deter
         x = self.img2(x)
@@ -696,15 +626,14 @@ class RSSM(nn.Module):
         stoch = self.get_dist(mean, std).rsample()
 
         if self.add_mask:
-            m_x_logp, m_x_entropy = m_x_dist.log_prob(m_x_sample), m_x_dist.entropy()
-            m_h_logp, m_h_entropy = m_h_dist.log_prob(m_h_sample), m_h_dist.entropy()
+            m_w_logp, m_w_entropy = m_w_dist.log_prob(m_w_sample), m_w_dist.entropy()
         else:
-            m_x_logp, m_x_entropy = None, None
-            m_h_logp, m_h_entropy = None, None
+            m_w_logp, m_w_entropy = None, None
 
         return [mean, std, stoch, deter], \
                [h_hat, c_hat], \
-               [m_x_logp, m_x_entropy, m_h_logp, m_h_entropy]
+               [m_w_logp, m_w_entropy], \
+               weight_change
         # [m_x_logp, m_x_entropy, m_x_sample, m_h_logp, m_h_entropy, m_h_sample]
 
     def get_feature(self, state: List[TensorType], hyper_state: List[TensorType] = None) -> TensorType:
@@ -733,7 +662,7 @@ class DreamerModel(TorchModelV2, nn.Module):
         self.hyper_size = model_config['hyper_size']
         self.n_z = model_config['n_z']
         self.decay = model_config['decay']
-        self.simple_rnn = model_config['simple_rnn']
+        self.w_cng_reg = model_config['w_cng_reg']
         self.hyper_in_state = model_config['hyper_in_state']
         self.add_mask = model_config['add_mask']
 
@@ -755,7 +684,7 @@ class DreamerModel(TorchModelV2, nn.Module):
             hidden=self.hidden_size,
             hyper_size=self.hyper_size,
             n_z=self.n_z,
-            simple_rnn=self.simple_rnn,
+            w_cng_reg=self.w_cng_reg,
             add_mask=self.add_mask
         )
         self.actor = ActionDecoder(
@@ -776,6 +705,7 @@ class DreamerModel(TorchModelV2, nn.Module):
         """Returns the action. Runs through the encoder, recurrent model,
         and policy to obtain action.
         """
+        self.dynamics.cell.reset_cell()
         if state is None:
             self.initial_state()
         else:
@@ -787,7 +717,7 @@ class DreamerModel(TorchModelV2, nn.Module):
         action = self.state[-1]
 
         embed = self.encoder(obs)
-        post, _, hyper_state, _ = self.dynamics.obs_step(post, action, embed, hyper_state)
+        post, _, hyper_state, _, _ = self.dynamics.obs_step(post, action, embed, hyper_state)
         feat = self.dynamics.get_feature(post, hyper_state if self.hyper_in_state else None)
 
         action_dist = self.actor(feat)
@@ -817,9 +747,10 @@ class DreamerModel(TorchModelV2, nn.Module):
             start_hyper.append(s.view(*shpe))
 
         def next_state(state, hyper_state):
+            self.dynamics.cell.reset_cell()
             feature = self.dynamics.get_feature(state, hyper_state if self.hyper_in_state else None).detach()
             action = self.actor(feature).rsample()
-            next_state, hyper_state, _ = self.dynamics.img_step(state, action, hyper_state)
+            next_state, hyper_state, _, _ = self.dynamics.img_step(state, action, hyper_state)
             return next_state, hyper_state, _
 
         last = start_prior

@@ -25,7 +25,8 @@ def compute_dreamer_loss(obs,
                          kl_coeff=1.0,
                          ent_coeff=0.1,
                          rei_coeff=1.0,
-                         free_nats=3.0,
+                         wc_coeff=0.01,
+                         kl_scale=0.8,
                          log=False):
     """Constructs loss for the Dreamer objective
         Args:
@@ -36,10 +37,11 @@ def compute_dreamer_loss(obs,
             imagine_horizon (int): Imagine horizon for actor and critic loss
             discount (float): Discount
             lambda_ (float): Lambda, like in GAE
+            wc_coeff (float): Weight change Coefficient for limiting weight change in model loss
             kl_coeff (float): KL Coefficient for Divergence loss in model loss
             ent_coeff(float): Mask Entropy Coefficient for Mask Entropy loss in model loss
             rei_coeff(float): Reinforce Coefficient for Reinforce loss in model loss
-            free_nats (float): Threshold for minimum divergence in model loss
+            kl_scale (float): scale for kl balancing
             log (bool): If log, generate gifs
         """
     encoder_weights = list(model.encoder.parameters())
@@ -55,7 +57,7 @@ def compute_dreamer_loss(obs,
 
     # PlaNET Model Loss
     latent = model.encoder(obs)
-    post, prior, hyper_state, mask = model.dynamics.observe(latent, action)
+    post, prior, hyper_state, mask, weight_changes = model.dynamics.observe(latent, action)
     features = model.dynamics.get_feature(post, hyper_state if model.hyper_in_state else None)
     image_pred = model.decoder(features)
     reward_pred = model.reward(features)
@@ -63,24 +65,33 @@ def compute_dreamer_loss(obs,
     reward_loss = -reward_pred.log_prob(reward)
     prior_dist = model.dynamics.get_dist(prior[0], prior[1])
     post_dist = model.dynamics.get_dist(post[0], post[1])
-    div = torch.mean(
-        torch.distributions.kl_divergence(post_dist, prior_dist).sum(dim=2))
-    div = torch.clamp(div, min=free_nats)
+    prior_dist_detach = model.dynamics.get_dist(prior[0].detach(), prior[1].detach())
+    post_dist_detach = model.dynamics.get_dist(post[0].detach(), post[1].detach())
+    div_l = torch.mean(
+        torch.distributions.kl_divergence(post_dist_detach, prior_dist))
+    div_r = torch.mean(
+        torch.distributions.kl_divergence(post_dist, prior_dist_detach))
+    div = kl_scale * div_l + (1-kl_scale)*div_r
+
     if model.add_mask:
-        mask_logp_x, mask_entropy_x, mask_logp_h, mask_entropy_h = mask
+        mask_logp_w, mask_entropy_w = mask
+        norm_mask = model.hidden_size * (model.hidden_size + model.deter_size)
+        mask_logp_w, mask_entropy_w = mask_logp_w / norm_mask, mask_entropy_w / norm_mask
+
         with torch.no_grad():
             # reinf_reward = (image_pred.log_prob(obs)) + \
             #                    reward_pred.log_prob(reward) # shape should be (batch, time)
             reinf_reward = -(image_loss + reward_loss)  # weighted by the likelihood
             reinforce_reward = reinf_reward.detach().clone()  # remove the rewards from the graph and clone them
         reinforce_reward_ema = model.ema.update(reinforce_reward)
-        mask_logp = mask_logp_x + mask_logp_h
+        mask_logp = mask_logp_w
         mask_reinforce_loss = -torch.mean((reinforce_reward - reinforce_reward_ema) * mask_logp)
-        mask_entropy_loss = -(torch.mean(mask_entropy_x) + torch.mean(mask_entropy_h))
+        mask_entropy_loss = -torch.mean(mask_entropy_w)
 
     image_loss = torch.mean(image_loss)
     reward_loss = torch.mean(reward_loss)
-    model_loss = kl_coeff * div + reward_loss + image_loss
+    weight_loss = wc_coeff * weight_changes if weight_changes is not None else 0
+    model_loss = kl_coeff * div + reward_loss + image_loss + weight_loss
     if model.add_mask:
         model_loss = model_loss + ent_coeff*mask_entropy_loss + rei_coeff*mask_reinforce_loss
     # [imagine_horizon, batch_length*batch_size, feature_size]
@@ -121,13 +132,14 @@ def compute_dreamer_loss(obs,
         "model_loss": model_loss,
         "reward_loss": reward_loss,
         "image_loss": image_loss,
+        "weight_changes": weight_changes,
         "divergence": div,
         "actor_loss": actor_loss,
         "critic_loss": critic_loss,
         "prior_ent": prior_ent,
         "post_ent": post_ent,
-        #"mask_ent_loss": mask_entropy_loss,
-        #"mask_reinforce_loss": mask_reinforce_loss
+        "mask_ent_loss": mask_entropy_loss if model.add_mask else 0,
+        "mask_reinforce_loss": mask_reinforce_loss if model.add_mask else 0
     }
 
     if log_gif is not None:
@@ -158,7 +170,7 @@ def lambda_return(reward, value, pcont, bootstrap, lambda_):
 def log_summary(obs, action, embed, image_pred, model):
     truth = obs[:6] + 0.5
     recon = image_pred.mean[:6]
-    init, _, hyper_init, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5]) #fix
+    init, _, hyper_init, _, _ = model.dynamics.observe(embed[:6, :5], action[:6, :5]) #fix
     init = [itm[:, -1] for itm in init]
     hyper_init = [itm[:, -1] for itm in hyper_init]
     prior, hyper = model.dynamics.imagine(action[:6, 5:], init, hyper_state=hyper_init)
@@ -189,7 +201,8 @@ def dreamer_loss(policy, model, dist_class, train_batch):
         policy.config["kl_coeff"],
         policy.config["ent_coeff"],
         policy.config["rei_coeff"],
-        policy.config["free_nats"],
+        policy.config["wc_coeff"],
+        policy.config["kl_scale"],
         log_gif,
     )
 

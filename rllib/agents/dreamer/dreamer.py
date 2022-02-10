@@ -44,14 +44,16 @@ DEFAULT_CONFIG = with_common_config({
     "batch_length": 50,
     # Imagination Horizon for Training Actor and Critic
     "imagine_horizon": 15,
-    # Free Nats
-    "free_nats": 3.0,
+    # Kl balancing scale
+    "kl_scale": 0.8,
     # KL Coeff for the Model Loss
     "kl_coeff": 1.0,
     # Reinforce Coeff for the Model Loss
     "rei_coeff": 1.0,
     # Entropy Coeff for the Model Loss
     "ent_coeff": 0.1,
+    # Weight change Coeff for the Model Loss
+    "wc_coeff": 0.1,
     # Distributed Dreamer not implemented yet
     "num_workers": 0,
     # Prefill Timesteps
@@ -79,7 +81,8 @@ DEFAULT_CONFIG = with_common_config({
         "decay": 0.9,
         "simple_rnn": False,
         "add_mask": False,
-        "hyper_in_state": True
+        "hyper_in_state": True,
+        "w_cng_reg": True,
     },
 
     "env_config": {
