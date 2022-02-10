@@ -85,11 +85,13 @@ def compute_dreamer_loss(obs,
     reward_loss_t = -reward_pred_t.log_prob(reward[:, model.ext_context:])
 
     prior_dist = model.dynamics.get_dist(priors[0], priors[1])
+    prior_dist_detached = model.dynamics.get_dist(priors[0].detach(), priors[1].detach())
     post_dist = model.dynamics.get_dist(posts[0], posts[1])
+    post_dist_detached = model.dynamics.get_dist(posts[0].detach(), posts[1].detach())
     kl_lhs = torch.mean(
-        torch.distributions.kl_divergence(post_dist.detach(), prior_dist).sum(dim=2))
+        torch.distributions.kl_divergence(post_dist_detached, prior_dist))#.sum(dim=2))
     kl_rhs = torch.mean(
-        torch.distributions.kl_divergence(post_dist, prior_dist.detach()).sum(dim=2))
+        torch.distributions.kl_divergence(post_dist, prior_dist_detached))#.sum(dim=2))
     div = kl_scale * kl_lhs + (1-kl_scale)*kl_rhs
 
     if model.add_mask:
