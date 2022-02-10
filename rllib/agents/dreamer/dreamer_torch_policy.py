@@ -28,7 +28,7 @@ def compute_dreamer_loss(obs,
                          rei_coeff = 1.0,
                          wc_coeff = 0.01,
                          matching_coeff = 0.01,
-                         free_nats = 3.0,
+                         kl_scale = 0.8,
                          log=False):
     """Constructs loss for the Dreamer objective
         Args:
@@ -44,7 +44,7 @@ def compute_dreamer_loss(obs,
             rei_coeff (float): Reinforce Coefficient for Reinforce loss in model loss
             wc_coeff (float): Weight change Coefficient for limiting weight change in model loss
             matching_coeff (float): Matching Coefficient for tying transformer and hypertran ouputs
-            free_nats (float): Threshold for minimum divergence in model loss
+            kl_scale (float): scale for kl balancing
             log (bool): If log, generate gifs
         """
     encoder_weights = list(model.encoder.parameters())
@@ -86,9 +86,12 @@ def compute_dreamer_loss(obs,
 
     prior_dist = model.dynamics.get_dist(priors[0], priors[1])
     post_dist = model.dynamics.get_dist(posts[0], posts[1])
-    div = torch.mean(
-        torch.distributions.kl_divergence(post_dist, prior_dist).sum(dim=2))
-    div = torch.clamp(div, min=free_nats)
+    kl_lhs = torch.mean(
+        torch.distributions.kl_divergence(post_dist.detach(), prior_dist).sum(dim=2))
+    kl_rhs = torch.mean(
+        torch.distributions.kl_divergence(post_dist, prior_dist.detach()).sum(dim=2))
+    div = kl_scale * kl_lhs + (1-kl_scale)*kl_rhs
+
     if model.add_mask:
         mask_logp_w, mask_entropy_w = mask
         norm_mask = pred_dstates.size(-1) * (action.size(-1) + pred_dstates.size(-1) + posts[0].size(-1))
@@ -235,7 +238,7 @@ def dreamer_loss(policy, model, dist_class, train_batch):
         policy.config["rei_coeff"],
         policy.config["wc_coeff"],
         policy.config["matching_coeff"],
-        policy.config["free_nats"],
+        policy.config["kl_scale"],
         log_gif,
     )
 

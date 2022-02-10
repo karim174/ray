@@ -44,8 +44,8 @@ DEFAULT_CONFIG = with_common_config({
     "batch_length": 50,
     # Imagination Horizon for Training Actor and Critic
     "imagine_horizon": 15,
-    # Free Nats
-    "free_nats": 3.0,
+    # Kl balancing scale
+    "kl_scale": 0.8,
     # KL Coeff for the Model Loss
     "kl_coeff": 1.0,
     # Reinforce Coeff for the Model Loss
@@ -67,7 +67,7 @@ DEFAULT_CONFIG = with_common_config({
     # This should be kept at 1 to preserve sample efficiency
     "num_envs_per_worker": 1,
     # Exploration Gaussian
-    "explore_noise": 0.3,
+    "explore_noise": 0.4,
     # Batch mode
     "batch_mode": "complete_episodes",
     # Custom Model
